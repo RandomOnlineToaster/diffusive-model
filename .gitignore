@@ -1,0 +1,16 @@
+node_modules
+dist
+
+# Real API key lives here; .env.example carries the documented defaults.
+.env.local
+
+# Raw DEM downloads. chonburi-dem.asc is ~210 MB, past GitHub's file limit,
+# and all three are reproducible with `npm run fetch:dem`. The derived
+# browser cache (chonburi-dem-cache.json) IS committed so the app runs
+# straight after a clone.
+public/data/chonburi-dem.asc
+public/data/chonburi-dem.tif
+public/data/chonburi-dem.json
+
+scripts/__pycache__
+*.log

@@ -1,0 +1,25 @@
+{
+  "name": "chonburi-rainfall-prototype",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "fetch:dem": "node scripts/fetch-dem.mjs && python scripts/build-dem-cache.py",
+    "build:dem-cache": "python scripts/build-dem-cache.py",
+    "fetch:rivers": "node scripts/fetch-rivers.mjs",
+    "fetch:water": "node scripts/fetch-water.mjs",
+    "build:pattaya": "node scripts/build-pattaya-network.mjs",
+    "fetch:roads": "node scripts/fetch-roads.mjs",
+    "build:roads": "python scripts/build-road-network.py"
+  },
+  "dependencies": {
+    "geotiff": "^2.1.4-beta.0",
+    "leaflet": "^1.9.4"
+  },
+  "devDependencies": {
+    "vite": "^7.1.3"
+  }
+}
