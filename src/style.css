@@ -643,10 +643,18 @@ select {
 .sim-legend {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 4px;
+  gap: 8px;
   font-size: 0.66rem;
   color: var(--text-muted);
+}
+
+/* Only the colour stops share the width evenly; the unit sits alongside,
+   otherwise "mm/h" is spaced as though it were another stop. */
+.sim-legend-stops {
+  display: flex;
+  flex: 1;
+  justify-content: space-between;
+  gap: 4px;
 }
 
 .sim-legend-item {
@@ -714,12 +722,12 @@ select {
   filter: invert(1) blur(var(--wx-blur, 3px));
 }
 
-/* Day slider, shown while the TMD forecast layer is on. */
+/* On-map slider, used only by the province-outlook fallback: that path has
+   no grid and no hours, so it never earned a panel card of its own. */
 .wx-time-control {
-  display: grid;
-  gap: 6px;
-  width: 340px;
-  max-width: 42vw;
+  display: flex;
+  align-items: center;
+  gap: 9px;
   padding: 8px 12px;
   border: 1px solid var(--border) !important;
   border-radius: 8px;
@@ -729,74 +737,67 @@ select {
   color: var(--text-muted);
 }
 
-.wx-time-row {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
-.wx-time-row--key {
-  justify-content: space-between;
-}
-
 .wx-time-control input[type='range'] {
-  flex: 1;
-  min-width: 0;
+  width: 140px;
   accent-color: var(--accent);
 }
 
-/* Heatmap overlay: a light blur finishes the smoothing the canvas upscale
-   starts, so cell corners never show through. */
-.wx-heat {
-  filter: blur(3px);
-}
-
-.wx-heat-tip {
-  font-size: 0.74rem;
-}
-
-/* Colour scale strip in the slider control. */
-.wx-scale {
-  display: grid;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
-}
-
-.wx-scale i {
-  display: block;
-  height: 9px;
-  border-radius: 3px;
-}
-
-.wx-scale-ticks {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.6rem;
-  color: var(--text-muted);
-}
-
-.wx-time-res {
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: var(--surface-muted);
-  font-size: 0.68rem;
-  white-space: nowrap;
+.wx-time-title {
+  font-weight: 600;
+  color: var(--text);
 }
 
 .wx-time-label {
-  flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  font-size: 0.72rem;
   color: var(--text);
   white-space: nowrap;
 }
 
-.wx-time-title {
-  flex: 0 0 auto;
+/* Forecast card in the analysis panel. */
+
+.panel-card--forecast {
+  display: grid;
+  gap: 10px;
+}
+
+.panel-card--forecast[hidden] {
+  display: none;
+}
+
+.forecast-source {
+  font-size: 0.68rem;
   font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.panel-card--forecast select {
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
   color: var(--text);
+  font-size: 0.78rem;
+}
+
+.forecast-scale {
+  display: grid;
+  gap: 3px;
+}
+
+.forecast-scale i {
+  display: block;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.forecast-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.62rem;
+  color: var(--text-muted);
 }
 
 .wx-forecast tr.wx-selected td {
@@ -870,7 +871,8 @@ select {
 
 .formula-line {
   margin: 0;
-  padding: 9px 11px;
+  padding: 11px;
+  text-align: center;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-muted);
@@ -878,11 +880,6 @@ select {
   font-size: 0.95rem;
 }
 
-.formula-note {
-  font-family: inherit;
-  font-size: 0.72rem;
-  color: var(--text-muted);
-}
 
 .formula-sub {
   margin: 0;

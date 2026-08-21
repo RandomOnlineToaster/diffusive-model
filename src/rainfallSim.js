@@ -465,8 +465,11 @@ export function createRainfallSimulator({ map, bounds, onWaterAdded, onTick, onR
     selectedId = null;
     handles.refresh();
     refreshStormCards();
-    render();
+    // Before render(), not after: the panel reads the street water through
+    // getWaterOnMapM3(), so painting first showed the volume that this very
+    // click was about to clear - and it took a second press to zero.
     onReset?.();
+    render();
   });
 
   dom.speed.addEventListener('input', () => {
@@ -495,9 +498,11 @@ export function createRainfallSimulator({ map, bounds, onWaterAdded, onTick, onR
       return;
     }
 
+    // Off the grid reads as zeros in the same three fields rather than a
+    // sentence: the readout keeps its shape, so the panel never reflows.
     const index = grid.indexAt(probeLatLng.lat, probeLatLng.lng);
     if (index < 0) {
-      dom.probe.textContent = 'Outside the rainfall grid.';
+      dom.probe.textContent = 'Intensity 0.0 mm/h \u00b7 Surface 0.0 mm \u00b7 Total 0.0 mm';
       return;
     }
 
@@ -528,7 +533,7 @@ export function createRainfallSimulator({ map, bounds, onWaterAdded, onTick, onR
   dom.legend.innerHTML = RAINFALL_LEGEND.map(
     (stop) =>
       `<span class="sim-legend-item"><i style="background:${stop.color}"></i>${stop.mmPerHour}</span>`
-  ).join('') + '<span class="sim-legend-unit">mm/h</span>';
+  ).join('');
 
   dom.speedValue.textContent = `${dom.speed.value}x`;
   refreshStormCards();

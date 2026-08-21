@@ -38,9 +38,41 @@ export function createAppLayout(root) {
             <div><span>Water on map</span><strong id="sim-water">0 m&sup3;</strong></div>
           </div>
 
-          <div class="sim-legend" id="sim-legend"></div>
+          <div class="sim-legend"><span class="sim-legend-stops" id="sim-legend"></span><span class="sim-legend-unit">mm/h</span></div>
 
-          <div class="sim-probe" id="sim-probe">Hover the map for cell values.</div>
+          <div class="sim-probe" id="sim-probe">Intensity 0.0 mm/h &middot; Surface 0.0 mm &middot; Total 0.0 mm</div>
+        </section>
+
+        <!-- Driven by weather.js while the Rain Forecast layer is on; the
+             time controls live here rather than over the map so they have
+             room for a separate day and hour. -->
+        <section class="panel-card panel-card--forecast" id="forecast-card" hidden>
+          <div class="sim-header">
+            <h2>Rain Forecast</h2>
+            <span class="forecast-source" id="forecast-source"></span>
+          </div>
+
+          <label class="field field--inline">
+            <span>Day</span>
+            <select id="forecast-day"></select>
+            <output id="forecast-day-value"></output>
+          </label>
+
+          <label class="field field--inline">
+            <span>Hour</span>
+            <input id="forecast-hour" type="range" min="0" max="23" step="1" value="0" />
+            <output id="forecast-hour-value">00:00</output>
+          </label>
+
+          <div class="sim-readout">
+            <div><span>At this hour</span><strong id="forecast-peak">0 mm/h</strong></div>
+            <div><span>Day total, wettest spot</span><strong id="forecast-total">0 mm</strong></div>
+          </div>
+
+          <div class="forecast-scale">
+            <i id="forecast-gradient"></i>
+            <span class="forecast-ticks" id="forecast-ticks"></span>
+          </div>
         </section>
 
         <section class="panel-card">
@@ -70,7 +102,6 @@ export function createAppLayout(root) {
           <h2>Storm Rain Formula</h2>
           <p class="formula-line">
             I(d) = I<sub>max</sub> &middot; e<sup>&minus;d&sup2; / 2&sigma;&sup2;</sup>
-            <span class="formula-note">- 0 past the rain radius</span>
           </p>
           <p class="formula-sub">Every tick each cell gains I &times; &Delta;t / 3600 mm of water, where d is its distance from the storm centre.</p>
           <ul class="formula-params">

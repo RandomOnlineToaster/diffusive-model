@@ -341,51 +341,84 @@ async function loadProvinceForecast(provinceName) {
 function buildGridForecastLayer(grid) {
   const { group, showStep, valueAt, stepCount } = createForecastGridLayer(grid);
 
-  let sliderLabel = null;
-  let current = 0;
+  // The timeline is split into a day picker and an hour slider. As one slider
+  // over every hour it ran to 168 steps, where a single pixel of travel jumped
+  // hours and landing on a particular morning took real effort.
+  const days = groupByDay(grid.times);
+
+  const dom = {
+    card: document.querySelector('#forecast-card'),
+    source: document.querySelector('#forecast-source'),
+    day: document.querySelector('#forecast-day'),
+    dayValue: document.querySelector('#forecast-day-value'),
+    hour: document.querySelector('#forecast-hour'),
+    hourValue: document.querySelector('#forecast-hour-value'),
+    peak: document.querySelector('#forecast-peak'),
+    total: document.querySelector('#forecast-total'),
+    gradient: document.querySelector('#forecast-gradient'),
+    ticks: document.querySelector('#forecast-ticks')
+  };
 
   function applyStep(index) {
-    current = index;
-    const { time, peak } = showStep(index);
-    if (sliderLabel) {
-      sliderLabel.textContent = `${time} · peak ${peak.toFixed(1)} mm/h`;
-    }
+    const { peak } = showStep(index);
+    dom.peak.textContent = `${peak.toFixed(1)} mm/h`;
   }
 
-  const TimeControl = L.Control.extend({
-    options: { position: 'topleft' },
+  /** The hour slider spans whatever hours that day actually carries. */
+  function selectDay(dayIndex) {
+    const day = days[dayIndex];
+    dom.hour.min = '0';
+    dom.hour.max = String(day.steps.length - 1);
+    dom.hour.value = String(Math.min(Number(dom.hour.value), day.steps.length - 1));
+    dom.dayValue.textContent = day.weekday;
 
-    onAdd() {
-      const container = L.DomUtil.create('div', 'wx-time-control');
-      const ticks = FORECAST_LEGEND.map((stop) => `<span>${stop.mmPerHour}</span>`).join('');
-      // Two rows: the timeline on top, the colour key beneath, so the control
-      // stays narrow enough not to reach the layer cards.
-      container.innerHTML =
-        '<div class="wx-time-row">' +
-        `<span class="wx-time-title">${grid.source}</span>` +
-        `<input type="range" min="0" max="${stepCount - 1}" step="1" value="${current}" />` +
-        '<span class="wx-time-label"></span>' +
-        '</div>' +
-        '<div class="wx-time-row wx-time-row--key">' +
-        `<span class="wx-scale"><i style="background:${legendGradient()}"></i>` +
-        `<span class="wx-scale-ticks">${ticks}</span></span>` +
-        `<span class="wx-time-res">${grid.resolutionText}</span>` +
-        '</div>';
+    // The day's total at the wettest point. Summing the area-wide peak hour
+    // by hour instead would add up rain that fell in different places, and
+    // read far higher than anywhere actually gets.
+    dom.total.textContent = `${wettestDailyTotal(day.steps).toFixed(1)} mm`;
 
-      L.DomEvent.disableClickPropagation(container);
-      L.DomEvent.disableScrollPropagation(container);
+    selectHour(Number(dom.hour.value));
+  }
 
-      const input = container.querySelector('input');
-      sliderLabel = container.querySelector('.wx-time-label');
-      input.addEventListener('input', () => applyStep(Number(input.value)));
-      applyStep(current);
-      return container;
-    },
+  function selectHour(hourIndex) {
+    const day = days[Number(dom.day.value)];
+    const step = day.steps[hourIndex];
+    dom.hourValue.textContent = day.hours[hourIndex];
+    applyStep(step);
+  }
 
-    onRemove() {
-      sliderLabel = null;
+  /** The largest per-point total across a day's steps. */
+  function wettestDailyTotal(steps) {
+    let wettest = 0;
+    for (const point of grid.points) {
+      let sum = 0;
+      for (const step of steps) {
+        sum += Number(point.rain[step] ?? 0);
+      }
+      if (sum > wettest) {
+        wettest = sum;
+      }
     }
-  });
+    return wettest;
+  }
+
+  function buildCard() {
+    dom.source.textContent = `${grid.source} · ${grid.resolutionText}`;
+    dom.day.innerHTML = days
+      .map((day, index) => `<option value="${index}">${day.label}</option>`)
+      .join('');
+    dom.gradient.style.background = legendGradient();
+    dom.ticks.innerHTML =
+      FORECAST_LEGEND.map((stop) => `<span>${stop.mmPerHour}</span>`).join('') +
+      '<span>mm/h</span>';
+
+    dom.day.value = '0';
+    selectDay(0);
+    dom.card.hidden = false;
+  }
+
+  dom.day.addEventListener('change', () => selectDay(Number(dom.day.value)));
+  dom.hour.addEventListener('input', () => selectHour(Number(dom.hour.value)));
 
   // An image overlay cannot carry per-cell tooltips, so the readout follows
   // the cursor instead - which also reads better than hovering tiny squares.
@@ -406,13 +439,13 @@ function buildGridForecastLayer(grid) {
       .openOn(event.target);
   }
 
-  const timeControl = new TimeControl();
+  // The card belongs to the layer: it appears and disappears with it.
   group.on('add', (event) => {
-    timeControl.addTo(event.target._map);
+    buildCard();
     event.target._map.on('mousemove', onMove);
   });
   group.on('remove', (event) => {
-    timeControl.remove();
+    dom.card.hidden = true;
     event.target._map?.off('mousemove', onMove);
     readout.close();
   });
@@ -425,8 +458,42 @@ function buildGridForecastLayer(grid) {
     available: true,
     gridded: true,
     source: grid.source,
-    forecast: null
+    forecast: null,
+    stepCount
   };
+}
+
+/** Split a flat hourly timeline into days, each with its own step indices. */
+function groupByDay(times) {
+  const days = [];
+  const byDate = new Map();
+
+  times.forEach((stamp, index) => {
+    const [date, clock] = String(stamp).split('T');
+    if (!byDate.has(date)) {
+      const parsed = new Date(`${date}T00:00:00Z`);
+      const day = {
+        date,
+        label: parsed.toLocaleDateString('en-GB', {
+          weekday: 'short',
+          day: 'numeric',
+          month: 'short',
+          timeZone: 'UTC'
+        }),
+        weekday: days.length === 0 ? 'today' : `+${days.length}d`,
+        steps: [],
+        hours: []
+      };
+      byDate.set(date, day);
+      days.push(day);
+    }
+
+    const day = byDate.get(date);
+    day.steps.push(index);
+    day.hours.push((clock || '00:00').slice(0, 5));
+  });
+
+  return days;
 }
 
 // --- observed rainfall, from TMD's own gauges --------------------------------
