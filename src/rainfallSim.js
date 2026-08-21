@@ -46,7 +46,6 @@ export function createRainfallSimulator({ map, bounds, onWaterAdded, onTick, onR
     play: document.querySelector('#sim-play'),
     add: document.querySelector('#sim-add'),
     reset: document.querySelector('#sim-reset'),
-    hint: document.querySelector('#sim-hint'),
     speed: document.querySelector('#sim-speed'),
     speedValue: document.querySelector('#sim-speed-value'),
     storms: document.querySelector('#sim-storms'),
@@ -306,9 +305,6 @@ export function createRainfallSimulator({ map, bounds, onWaterAdded, onTick, onR
     refreshStormCards();
     previewField();
 
-    if (running && stormSystem.storms.length === 0) {
-      dom.hint.textContent = 'Storm removed - still simulating drainage.';
-    }
   }
 
   // The formula card mirrors whichever storm is being edited; with none
@@ -415,12 +411,11 @@ export function createRainfallSimulator({ map, bounds, onWaterAdded, onTick, onR
     }
   }
 
+  // Placing shows itself: the Add storm button stays lit and the map cursor
+  // turns to a crosshair, so it needs no line of prose alongside.
   function setPlacing(next) {
     placing = next;
     dom.add.classList.toggle('sim-button--active', placing);
-    dom.hint.textContent = placing
-      ? 'Click the map to drop the storm centre.'
-      : 'Click Add storm, then click the map to place a storm cell. Drag its centre to move it, or its edge handle to resize.';
     map.getContainer().style.cursor = placing ? 'crosshair' : '';
   }
 
@@ -449,7 +444,6 @@ export function createRainfallSimulator({ map, bounds, onWaterAdded, onTick, onR
     // Playing without a storm is allowed while water is still draining;
     // only a completely dry, stormless grid has nothing to simulate.
     if (stormSystem.storms.length === 0 && grid.totals().wetCells === 0) {
-      dom.hint.textContent = 'Add a storm cell first.';
       return;
     }
     setRunning(!running);

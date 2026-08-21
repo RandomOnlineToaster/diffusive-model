@@ -17,7 +17,6 @@ export function createAppLayout(root) {
             <button type="button" id="sim-add" class="sim-button">Add storm</button>
             <button type="button" id="sim-reset" class="sim-button">Reset</button>
           </div>
-          <p class="sim-hint" id="sim-hint">Click <strong>Add storm</strong>, then click the map to place a storm cell. Drag its centre to move it, or its edge handle to resize.</p>
 
           <label class="field field--inline">
             <span>Speed</span>

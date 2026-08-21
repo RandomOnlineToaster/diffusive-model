@@ -452,12 +452,6 @@ select {
   color: #dc2626;
 }
 
-.sim-hint {
-  margin: 0;
-  font-size: 0.75rem;
-  line-height: 1.4;
-  color: var(--text-muted);
-}
 
 .field--inline {
   grid-template-columns: 5.6rem 1fr 4.2rem;
