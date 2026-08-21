@@ -439,3 +439,138 @@ function buildGridForecastLayer(grid) {
     forecast: null
   };
 }
+
+// --- observed rainfall, from TMD's own gauges --------------------------------
+//
+// The forecast endpoints publish a chance of rain per province; this one
+// publishes what actually fell, in millimetres, at real stations. It is the
+// only measured ground truth available without registering, and there are 14
+// gauges inside the study area - Pattaya sits almost exactly on the
+// simulation centre.
+
+// Daily totals, not rates: these stops are what a rain gauge reads over a day.
+const GAUGE_STOPS = [
+  { mm: 0, color: '#cbd5e1', text: 'dry' },
+  { mm: 0.1, color: '#93c5fd', text: 'a trace' },
+  { mm: 1, color: '#3b82f6', text: 'light' },
+  { mm: 10, color: '#16a34a', text: 'moderate' },
+  { mm: 35, color: '#eab308', text: 'heavy' },
+  { mm: 90, color: '#f97316', text: 'very heavy' },
+  { mm: 150, color: '#dc2626', text: 'extreme' }
+];
+
+function gaugeStyleFor(mm) {
+  let picked = GAUGE_STOPS[0];
+  for (const stop of GAUGE_STOPS) {
+    if (mm >= stop.mm) {
+      picked = stop;
+    }
+  }
+  return picked;
+}
+
+function gaugeRadius(mm) {
+  // Square-root so a 180 mm downpour does not swamp the map, while the
+  // difference between 1 mm and 10 mm stays visible.
+  return 4 + Math.min(11, Math.sqrt(Math.max(0, mm)) * 1.4);
+}
+
+export async function createRainGaugeLayer() {
+  const group = L.layerGroup();
+
+  let stations = [];
+  try {
+    stations = await loadStations();
+  } catch (error) {
+    console.warn('TMD gauges unavailable:', error.message);
+    return { layer: group, label: 'Rain Gauges (no TMD data)', available: false, count: 0 };
+  }
+
+  for (const station of stations) {
+    const style = gaugeStyleFor(station.rainMm);
+
+    const marker = L.circleMarker([station.lat, station.lng], {
+      radius: gaugeRadius(station.rainMm),
+      color: '#ffffff',
+      weight: 1.5,
+      fillColor: style.color,
+      fillOpacity: 0.9
+    });
+
+    marker.bindTooltip(
+      `<strong>${station.name}</strong><br>${station.rainMm.toFixed(1)} mm (${style.text})`,
+      { direction: 'top' }
+    );
+
+    const rows = [
+      ['Rainfall', `${station.rainMm.toFixed(1)} mm`],
+      ['Temperature', station.temperature ? `${station.temperature} °C` : null],
+      ['Humidity', station.humidity ? `${station.humidity} %` : null],
+      ['Wind', station.windSpeed ? `${station.windSpeed} km/h from ${station.windDirection}°` : null],
+      ['Pressure', station.pressure ? `${station.pressure} hPa` : null]
+    ].filter(([, value]) => value);
+
+    marker.bindPopup(
+      `<strong>${station.name}</strong><br>` +
+        `<small>${station.province} · WMO ${station.wmo}</small>` +
+        '<table class="wx-forecast"><tbody>' +
+        rows.map(([label, value]) => `<tr><td>${label}</td><td>${value}</td></tr>`).join('') +
+        '</tbody></table>' +
+        `<small>Observed ${station.observedAt}<br>Thai Meteorological Department</small>`
+    );
+
+    group.addLayer(marker);
+  }
+
+  return {
+    layer: group,
+    label: 'Rain Gauges (TMD)',
+    available: true,
+    count: stations.length,
+    stations
+  };
+}
+
+async function loadStations() {
+  const url =
+    `${config.tmdProxyPath}/api/WeatherToday/V2/` +
+    `?uid=${encodeURIComponent(config.tmdUid)}&ukey=${encodeURIComponent(config.tmdUkey)}&format=json`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`TMD responded ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const raw = payload?.Stations?.Station || [];
+
+  return raw
+    .map((entry) => {
+      const observation = entry.Observation || {};
+      return {
+        wmo: entry.WmoStationNumber,
+        // English names are plain ASCII; the Thai ones are kept for the label
+        // where they exist, since that is what local users read.
+        name: entry.StationNameThai || entry.StationNameEnglish,
+        province: entry.Province || '',
+        lat: Number(entry.Latitude),
+        lng: Number(entry.Longitude),
+        rainMm: Number(observation.Rainfall ?? 0),
+        temperature: observation.Temperature,
+        humidity: observation.RelativeHumidity,
+        windSpeed: observation.WindSpeed,
+        windDirection: observation.WindDirection,
+        pressure: observation.MeanSeaLevelPressure,
+        observedAt: observation.DateTime || 'unknown'
+      };
+    })
+    .filter(
+      (station) =>
+        Number.isFinite(station.lat) &&
+        Number.isFinite(station.lng) &&
+        Number.isFinite(station.rainMm)
+    );
+}
+
+/** Colour key for the gauge layer, for the map legend. */
+export const GAUGE_LEGEND = GAUGE_STOPS;

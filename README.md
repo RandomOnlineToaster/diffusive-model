@@ -13,9 +13,10 @@ storms and routes the resulting water across terrain and streets.
 - **Flow paths / accumulation / direction** — D8 routing on the DEM analysis
   grid, for the catchment-scale picture.
 - **Weather** — live satellite cloud cover and observed rain from
-  [JAXA GSMaP](https://sharaku.eorc.jaxa.jp/GSMaP/), plus the province
-  rainfall forecast from the
-  [Thai Meteorological Department](https://data.tmd.go.th/).
+  [JAXA GSMaP](https://sharaku.eorc.jaxa.jp/GSMaP/), a gridded rainfall
+  forecast with an hourly slider, and measured rainfall from the
+  [Thai Meteorological Department](https://data.tmd.go.th/)'s own rain
+  gauges — 127 stations nationwide, 14 of them inside the study area.
 - **Infrastructure layers** — rivers, water bodies, water gates, drainage
   pipes and sensor stations.
 
@@ -66,6 +67,19 @@ Both sources work without registration, but they have quirks worth knowing:
   unavailable instead of failing silently. The credentials default to TMD's
   published demo pair; register for your own at
   <https://data.tmd.go.th/>.
+
+### Rain gauges
+
+`Rain Gauges (TMD)` plots every TMD station with its observed rainfall in
+millimetres, sized and coloured by amount, with temperature, humidity, wind
+and pressure in the popup. Keyless, and the only **measured** ground truth
+available without registering — useful for checking both the forecast and the
+flood model against what actually fell. Pattaya's gauge sits almost exactly on
+the simulation centre.
+
+Note the difference between the three TMD products: the free forecast gives a
+*chance of rain* per province, the free observations give *millimetres* at
+points, and only the token-gated `nwpapi` gives *millimetres on a grid*.
 
 ### Forecast resolution
 

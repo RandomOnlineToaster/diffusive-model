@@ -35,6 +35,7 @@ import { createRainfallSimulator } from './rainfallSim.js';
 import {
   createCloudLayer,
   createRainForecastLayer,
+  createRainGaugeLayer,
   createSatelliteRainLayer
 } from './weather.js';
 import { config } from './config.js';
@@ -113,15 +114,16 @@ export async function initializeMap() {
   // Live weather: satellite tiles need no fetch, the TMD forecast does.
   const cloudCover = createCloudLayer();
   const satelliteRain = createSatelliteRainLayer();
-  const rainForecast = await createRainForecastLayer({
-    boundary: chonburiBoundary,
-    bounds: dem.bounds
-  });
+  const [rainForecast, rainGauges] = await Promise.all([
+    createRainForecastLayer({ boundary: chonburiBoundary, bounds: dem.bounds }),
+    createRainGaugeLayer()
+  ]);
   console.info(
     `Weather: GSMaP frame ${cloudCover.frame.year}-${cloudCover.frame.month}-` +
       `${cloudCover.frame.day} ${cloudCover.frame.hour}:00 UTC, ` +
       `rain forecast ${rainForecast.available ? rainForecast.source || 'province outlook' : 'unavailable'}` +
-      `${rainForecast.gridded ? ' (gridded)' : ''}`
+      `${rainForecast.gridded ? ' (gridded)' : ''}, ` +
+      `${rainGauges.count} TMD rain gauges`
   );
   satelliteRain.updateBlur(map.getZoom());
   map.on('zoomend', () => satelliteRain.updateBlur(map.getZoom()));
@@ -421,7 +423,8 @@ export async function initializeMap() {
       [cloudCover.label]: cloudCover.layer,
       [satelliteRain.label]: satelliteRain.layer,
       [rainForecast.available ? rainForecast.label : wipLabel(rainForecast.label)]:
-        rainForecast.layer
+        rainForecast.layer,
+      [rainGauges.available ? rainGauges.label : wipLabel(rainGauges.label)]: rainGauges.layer
     },
     { collapsed: false }
   );
