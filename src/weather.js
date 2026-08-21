@@ -1,6 +1,11 @@
 import L from 'leaflet';
 import { config } from './config.js';
-import { createForecastGridLayer, loadForecastGrid } from './forecast.js';
+import {
+  createForecastGridLayer,
+  FORECAST_LEGEND,
+  legendGradient,
+  loadForecastGrid
+} from './forecast.js';
 
 // Live weather layers, from two public sources.
 //
@@ -345,7 +350,7 @@ async function loadProvinceForecast(provinceName) {
  * behaves identically whichever provider answered.
  */
 function buildGridForecastLayer(grid) {
-  const { group, showStep, stepCount } = createForecastGridLayer(grid);
+  const { group, showStep, valueAt, stepCount } = createForecastGridLayer(grid);
 
   let sliderLabel = null;
   let current = 0;
@@ -363,11 +368,20 @@ function buildGridForecastLayer(grid) {
 
     onAdd() {
       const container = L.DomUtil.create('div', 'wx-time-control');
+      const ticks = FORECAST_LEGEND.map((stop) => `<span>${stop.mmPerHour}</span>`).join('');
+      // Two rows: the timeline on top, the colour key beneath, so the control
+      // stays narrow enough not to reach the layer cards.
       container.innerHTML =
-        `<span class="wx-time-title">${grid.source} forecast</span>` +
+        '<div class="wx-time-row">' +
+        `<span class="wx-time-title">${grid.source}</span>` +
         `<input type="range" min="0" max="${stepCount - 1}" step="1" value="${current}" />` +
         '<span class="wx-time-label"></span>' +
-        `<span class="wx-time-res">${grid.resolutionText}</span>`;
+        '</div>' +
+        '<div class="wx-time-row wx-time-row--key">' +
+        `<span class="wx-scale"><i style="background:${legendGradient()}"></i>` +
+        `<span class="wx-scale-ticks">${ticks}</span></span>` +
+        `<span class="wx-time-res">${grid.resolutionText}</span>` +
+        '</div>';
 
       L.DomEvent.disableClickPropagation(container);
       L.DomEvent.disableScrollPropagation(container);
@@ -384,9 +398,35 @@ function buildGridForecastLayer(grid) {
     }
   });
 
+  // An image overlay cannot carry per-cell tooltips, so the readout follows
+  // the cursor instead - which also reads better than hovering tiny squares.
+  const readout = L.tooltip({ sticky: true, className: 'wx-heat-tip' });
+  function onMove(event) {
+    const value = valueAt(event.latlng.lat, event.latlng.lng);
+    if (value === null) {
+      readout.close();
+      return;
+    }
+
+    readout
+      .setLatLng(event.latlng)
+      .setContent(
+        `<strong>${value.toFixed(1)} mm/h</strong> forecast<br>` +
+          `<small>${grid.sourceLabel}, ${grid.resolutionText}</small>`
+      )
+      .openOn(event.target);
+  }
+
   const timeControl = new TimeControl();
-  group.on('add', (event) => timeControl.addTo(event.target._map));
-  group.on('remove', () => timeControl.remove());
+  group.on('add', (event) => {
+    timeControl.addTo(event.target._map);
+    event.target._map.on('mousemove', onMove);
+  });
+  group.on('remove', (event) => {
+    timeControl.remove();
+    event.target._map?.off('mousemove', onMove);
+    readout.close();
+  });
 
   applyStep(0);
 

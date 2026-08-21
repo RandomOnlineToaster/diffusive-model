@@ -246,7 +246,10 @@ export function createRainfallGrid({ bounds, columns = 240, rows = 240, drainTau
   };
 }
 
-function rampColor(value) {
+// Continuous colour for a rain rate, interpolated between the legend stops.
+// Shared with the forecast heatmap so predicted and simulated rain read on
+// exactly the same scale.
+export function rampColor(value) {
   for (let index = 1; index < INTENSITY_STOPS.length; index += 1) {
     const previous = INTENSITY_STOPS[index - 1];
     const current = INTENSITY_STOPS[index];

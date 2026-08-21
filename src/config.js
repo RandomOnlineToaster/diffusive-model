@@ -149,7 +149,7 @@ export const config = {
   tmdForecastDomain: readNumber(env.VITE_TMD_DOMAIN, 2, { min: 1, max: 2 }),
   // Fallback grid: points per side over the study bounds, and how many days.
   forecastGridSteps: readNumber(env.VITE_FORECAST_GRID, 10, { min: 2, max: 20 }),
-  forecastDays: readNumber(env.VITE_FORECAST_DAYS, 3, { min: 1, max: 10 }),
+  forecastDays: readNumber(env.VITE_FORECAST_DAYS, 7, { min: 1, max: 16 }),
   forecastGridOpacity: readNumber(env.VITE_FORECAST_OPACITY, 0.5, { min: 0.05, max: 1 }),
   // Ceiling on drawn forecast cells; TMD at 3 km over the province exceeds it.
   forecastMaxCells: readNumber(env.VITE_FORECAST_MAX_CELLS, 1500, { min: 50, max: 20000 }),

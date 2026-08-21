@@ -723,9 +723,10 @@ select {
 
 /* Day slider, shown while the TMD forecast layer is on. */
 .wx-time-control {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  display: grid;
+  gap: 6px;
+  width: 340px;
+  max-width: 42vw;
   padding: 8px 12px;
   border: 1px solid var(--border) !important;
   border-radius: 8px;
@@ -735,9 +736,51 @@ select {
   color: var(--text-muted);
 }
 
+.wx-time-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.wx-time-row--key {
+  justify-content: space-between;
+}
+
 .wx-time-control input[type='range'] {
-  width: 150px;
+  flex: 1;
+  min-width: 0;
   accent-color: var(--accent);
+}
+
+/* Heatmap overlay: a light blur finishes the smoothing the canvas upscale
+   starts, so cell corners never show through. */
+.wx-heat {
+  filter: blur(3px);
+}
+
+.wx-heat-tip {
+  font-size: 0.74rem;
+}
+
+/* Colour scale strip in the slider control. */
+.wx-scale {
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.wx-scale i {
+  display: block;
+  height: 9px;
+  border-radius: 3px;
+}
+
+.wx-scale-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.6rem;
+  color: var(--text-muted);
 }
 
 .wx-time-res {
@@ -749,11 +792,18 @@ select {
 }
 
 .wx-time-label {
-  min-width: 12.5em;
+  flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
+  font-size: 0.72rem;
   color: var(--text);
   white-space: nowrap;
+}
+
+.wx-time-title {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--text);
 }
 
 .wx-forecast tr.wx-selected td {

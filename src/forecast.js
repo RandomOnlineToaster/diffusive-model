@@ -1,6 +1,6 @@
 import L from 'leaflet';
 import { config } from './config.js';
-import { RAINFALL_LEGEND } from './rainfallGrid.js';
+
 
 // Gridded rainfall forecast, from whichever provider is available.
 //
@@ -17,15 +17,46 @@ import { RAINFALL_LEGEND } from './rainfallGrid.js';
 
 const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
 
-/** Colour a rain rate on the same scale the storm simulator uses. */
-function rainColor(mmPerHour) {
-  let picked = null;
-  for (const stop of RAINFALL_LEGEND) {
-    if (mmPerHour >= stop.mmPerHour) {
-      picked = stop;
+// Forecast rain needs its own colour scale. The simulator's runs 0.5 to
+// 100 mm/h because a placed storm is a cloudburst; a real forecast for
+// Chon Buri sits between a trace and about 20 mm/h, so on that scale almost
+// every cell landed in the first band and the map looked empty. These stops
+// spread the range a forecast actually occupies, in the blue-green-yellow-red
+// order weather maps use.
+const FORECAST_STOPS = [
+  { mmPerHour: 0.1, color: [191, 219, 254] },
+  { mmPerHour: 0.5, color: [96, 165, 250] },
+  { mmPerHour: 1, color: [37, 99, 235] },
+  { mmPerHour: 2, color: [22, 163, 74] },
+  { mmPerHour: 4, color: [163, 230, 53] },
+  { mmPerHour: 8, color: [234, 179, 8] },
+  { mmPerHour: 15, color: [249, 115, 22] },
+  { mmPerHour: 25, color: [220, 38, 38] }
+];
+
+export const FORECAST_LEGEND = FORECAST_STOPS.map((stop) => ({
+  mmPerHour: stop.mmPerHour,
+  color: `rgb(${stop.color.join(',')})`
+}));
+
+/** Continuous colour for a forecast rain rate. */
+function forecastColor(value) {
+  for (let index = 1; index < FORECAST_STOPS.length; index += 1) {
+    const previous = FORECAST_STOPS[index - 1];
+    const current = FORECAST_STOPS[index];
+
+    if (value <= current.mmPerHour) {
+      const span = current.mmPerHour - previous.mmPerHour;
+      const ratio = span > 0 ? (value - previous.mmPerHour) / span : 0;
+      return [
+        previous.color[0] + (current.color[0] - previous.color[0]) * ratio,
+        previous.color[1] + (current.color[1] - previous.color[1]) * ratio,
+        previous.color[2] + (current.color[2] - previous.color[2]) * ratio
+      ];
     }
   }
-  return picked ? picked.color : null;
+
+  return FORECAST_STOPS[FORECAST_STOPS.length - 1].color;
 }
 
 /** A regular lat/lng grid over the study area, as request coordinates. */
@@ -203,58 +234,142 @@ export async function loadForecastGrid(bounds) {
 }
 
 /**
- * One rectangle per grid point, recoloured as the time step changes.
+ * Arrange scattered forecast points into the regular lattice they came from.
  *
- * Canvas rather than SVG: a few hundred cells redrawn on every slider move is
- * exactly the workload that made the street layer stutter as DOM nodes.
+ * Both providers sample a grid, but they hand it back as a flat list. Sorting
+ * the distinct coordinates recovers the rows and columns, which is what makes
+ * smooth interpolation possible.
  */
-export function createForecastGridLayer(grid) {
-  const group = L.layerGroup();
-  const renderer = L.canvas({ padding: 0.2 });
-  const halfLat = grid.cellLat / 2;
-  const halfLng = grid.cellLng / 2;
+function toLattice(points) {
+  const key = (value) => Number(value.toFixed(4));
+  const lats = [...new Set(points.map((p) => key(p.lat)))].sort((a, b) => a - b);
+  const lngs = [...new Set(points.map((p) => key(p.lng)))].sort((a, b) => a - b);
 
-  const cells = grid.points.map((point) => {
-    const rectangle = L.rectangle(
-      [
-        [point.lat - halfLat, point.lng - halfLng],
-        [point.lat + halfLat, point.lng + halfLng]
-      ],
-      { renderer, stroke: false, fillOpacity: 0, interactive: true }
-    );
+  const latIndex = new Map(lats.map((v, i) => [v, i]));
+  const lngIndex = new Map(lngs.map((v, i) => [v, i]));
+  const cells = new Array(lats.length * lngs.length).fill(null);
 
-    group.addLayer(rectangle);
-    return { point, rectangle };
-  });
-
-  function showStep(index) {
-    const stamp = grid.times[index];
-    const local = stamp ? stamp.replace('T', ' ') : `step ${index}`;
-    let peak = 0;
-
-    for (const { point, rectangle } of cells) {
-      const value = Number(point.rain[index] ?? 0);
-      if (value > peak) {
-        peak = value;
-      }
-
-      const color = rainColor(value);
-      if (!color) {
-        rectangle.setStyle({ fillOpacity: 0 });
-        rectangle.unbindTooltip();
-        continue;
-      }
-
-      rectangle.setStyle({ fillColor: color, fillOpacity: config.forecastGridOpacity });
-      rectangle.bindTooltip(
-        `<strong>${value.toFixed(1)} mm/h</strong><br>${local}<br>` +
-          `<small>${grid.sourceLabel}, ${grid.resolutionText}</small>`,
-        { sticky: true }
-      );
+  for (const point of points) {
+    const row = latIndex.get(key(point.lat));
+    const column = lngIndex.get(key(point.lng));
+    if (row !== undefined && column !== undefined) {
+      cells[row * lngs.length + column] = point;
     }
-
-    return { time: local, peak };
   }
 
-  return { group, cells, showStep, stepCount: grid.times.length };
+  return { rows: lats.length, columns: lngs.length, lats, lngs, cells };
+}
+
+/**
+ * The forecast as a weather-map heatmap.
+ *
+ * Values are painted one pixel per grid cell into a small offscreen canvas,
+ * then drawn up to the display canvas with smoothing on: the browser's own
+ * bilinear filter turns the coarse lattice into the continuous wash a rain
+ * forecast is normally shown as, instead of a chequerboard of hard squares.
+ */
+export function createForecastGridLayer(grid) {
+  const lattice = toLattice(grid.points);
+  const bounds = L.latLngBounds(
+    [lattice.lats[0] - grid.cellLat / 2, lattice.lngs[0] - grid.cellLng / 2],
+    [
+      lattice.lats[lattice.rows - 1] + grid.cellLat / 2,
+      lattice.lngs[lattice.columns - 1] + grid.cellLng / 2
+    ]
+  );
+
+  const source = document.createElement('canvas');
+  source.width = lattice.columns;
+  source.height = lattice.rows;
+  const sourceCtx = source.getContext('2d');
+
+  // Upscaled target: enough pixels that the smoothing has room to work, but
+  // not so many that redrawing on every slider step costs anything.
+  const scale = Math.max(4, Math.ceil(320 / Math.max(lattice.rows, lattice.columns)));
+  const display = document.createElement('canvas');
+  display.width = lattice.columns * scale;
+  display.height = lattice.rows * scale;
+  const displayCtx = display.getContext('2d');
+  displayCtx.imageSmoothingEnabled = true;
+  displayCtx.imageSmoothingQuality = 'high';
+
+  const overlay = L.imageOverlay('', bounds, {
+    opacity: config.forecastGridOpacity,
+    interactive: false,
+    className: 'wx-heat'
+  });
+  const group = L.layerGroup([overlay]);
+
+  // Values for the step on screen, so a hover can be answered without
+  // re-reading the whole series.
+  let currentValues = new Float32Array(lattice.rows * lattice.columns);
+
+  function showStep(index) {
+    const image = sourceCtx.createImageData(lattice.columns, lattice.rows);
+    const pixels = image.data;
+    let peak = 0;
+
+    for (let row = 0; row < lattice.rows; row += 1) {
+      for (let column = 0; column < lattice.columns; column += 1) {
+        const cell = lattice.cells[row * lattice.columns + column];
+        const value = cell ? Number(cell.rain[index] ?? 0) : 0;
+        currentValues[row * lattice.columns + column] = value;
+        if (value > peak) {
+          peak = value;
+        }
+
+        // Canvas rows run north to south; the lattice runs south to north.
+        const offset = ((lattice.rows - 1 - row) * lattice.columns + column) * 4;
+        if (value < FORECAST_STOPS[0].mmPerHour) {
+          pixels[offset + 3] = 0;
+          continue;
+        }
+
+        const [r, g, b] = forecastColor(value);
+        pixels[offset] = r;
+        pixels[offset + 1] = g;
+        pixels[offset + 2] = b;
+        // Fade in over the lightest band so drizzle edges out softly rather
+        // than ending on a hard line.
+        pixels[offset + 3] = Math.min(255, 150 + value * 40);
+      }
+    }
+
+    sourceCtx.putImageData(image, 0, 0);
+    displayCtx.clearRect(0, 0, display.width, display.height);
+    displayCtx.drawImage(source, 0, 0, display.width, display.height);
+    overlay.setUrl(display.toDataURL());
+
+    const stamp = grid.times[index];
+    return { time: stamp ? stamp.replace('T', ' ') : `step ${index}`, peak };
+  }
+
+  /** Rain at a point, for the hover readout. */
+  function valueAt(lat, lng) {
+    const row = Math.round((lat - lattice.lats[0]) / grid.cellLat);
+    const column = Math.round((lng - lattice.lngs[0]) / grid.cellLng);
+    if (row < 0 || column < 0 || row >= lattice.rows || column >= lattice.columns) {
+      return null;
+    }
+
+    return currentValues[row * lattice.columns + column];
+  }
+
+  return { group, showStep, valueAt, stepCount: grid.times.length };
+}
+
+/**
+ * The colour scale as a strip for the slider control.
+ *
+ * Positioned on a log scale, matching how the stops are spaced: on a linear
+ * strip everything below 5 mm/h would be squeezed into the first few pixels.
+ */
+export function legendGradient() {
+  const first = Math.log(FORECAST_STOPS[0].mmPerHour);
+  const last = Math.log(FORECAST_STOPS[FORECAST_STOPS.length - 1].mmPerHour);
+  const stops = FORECAST_LEGEND.map((stop) => {
+    const position = ((Math.log(stop.mmPerHour) - first) / (last - first)) * 100;
+    return `${stop.color} ${position.toFixed(1)}%`;
+  });
+  return `linear-gradient(to right, ${stops.join(', ')})`;
 }

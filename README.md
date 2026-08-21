@@ -76,13 +76,20 @@ from whichever provider is available:
 | --- | --- | --- | --- |
 | TMD `nwpapi` domain 2 | ~3 km, hourly | 72 h | OAuth token |
 | TMD `nwpapi` domain 1 | ~9 km, 3-hourly | 10 days | OAuth token |
-| Open-Meteo (fallback) | ~8 km, hourly | 3 days | nothing |
+| Open-Meteo (fallback) | ~8 km, hourly | 7 days (16 max) | nothing |
 
 Set `VITE_TMD_TOKEN` and the layer switches to TMD automatically; the label
 and slider name the live source. If TMD errors, it falls back rather than
 losing the layer. Without any grid, it drops to TMD's keyless province
 outlook — one chance-of-rain figure per province per day, tinting the whole
 boundary, which is all that endpoint publishes.
+
+Cells are drawn as a smoothed heatmap rather than hard squares: values are
+painted one pixel per grid cell, upscaled with bilinear filtering and a light
+blur, so the coarse lattice reads as the continuous wash a rain forecast is
+normally shown as. The colour scale is log-spaced over 0.1-25 mm/h, the range
+a real forecast occupies - the simulator's 0.5-100 mm/h storm scale left
+almost every cell in its first band.
 
 TMD's docs warn that a wide box pulls a lot of data — the province at 3 km is
 roughly ten thousand points — so cells are thinned evenly to
