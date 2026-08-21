@@ -116,14 +116,14 @@ export async function initializeMap() {
   const satelliteRain = createSatelliteRainLayer();
   const [rainForecast, rainGauges] = await Promise.all([
     createRainForecastLayer({ boundary: chonburiBoundary, bounds: dem.bounds }),
-    createRainGaugeLayer()
+    createRainGaugeLayer({ isInside: isInsideProvince })
   ]);
   console.info(
     `Weather: GSMaP frame ${cloudCover.frame.year}-${cloudCover.frame.month}-` +
       `${cloudCover.frame.day} ${cloudCover.frame.hour}:00 UTC, ` +
       `rain forecast ${rainForecast.available ? rainForecast.source || 'province outlook' : 'unavailable'}` +
       `${rainForecast.gridded ? ' (gridded)' : ''}, ` +
-      `${rainGauges.count} TMD rain gauges`
+      `${rainGauges.count} of ${rainGauges.totalCount} TMD rain gauges in area`
   );
   satelliteRain.updateBlur(map.getZoom());
   map.on('zoomend', () => satelliteRain.updateBlur(map.getZoom()));

@@ -70,12 +70,18 @@ Both sources work without registration, but they have quirks worth knowing:
 
 ### Rain gauges
 
-`Rain Gauges (TMD)` plots every TMD station with its observed rainfall in
-millimetres, sized and coloured by amount, with temperature, humidity, wind
-and pressure in the popup. Keyless, and the only **measured** ground truth
-available without registering — useful for checking both the forecast and the
-flood model against what actually fell. Pattaya's gauge sits almost exactly on
-the simulation centre.
+`Rain Gauges (TMD)` plots the TMD stations inside the study area with their
+observed rainfall in millimetres, sized and coloured by amount, with
+temperature, humidity, wind and pressure in the popup. Keyless, and the only
+**measured** ground truth available without registering — useful for checking
+both the forecast and the flood model against what actually fell.
+
+Five of TMD's 127 national stations fall in Chon Buri: Chon Buri, Ko Sichang,
+Laem Chabang, Pattaya and Sattahip. Pattaya's sits almost exactly on the
+simulation centre. The filter accepts stations *inside or just offshore* of
+the province, because coastal gauges sit on piers and reclaimed land outside
+the land polygon — Laem Chabang's deep-sea port is a couple of kilometres out
+and would otherwise be dropped.
 
 Note the difference between the three TMD products: the free forecast gives a
 *chance of rain* per province, the free observations give *millimetres* at

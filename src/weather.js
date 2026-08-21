@@ -475,7 +475,7 @@ function gaugeRadius(mm) {
   return 4 + Math.min(11, Math.sqrt(Math.max(0, mm)) * 1.4);
 }
 
-export async function createRainGaugeLayer() {
+export async function createRainGaugeLayer({ isInside } = {}) {
   const group = L.layerGroup();
 
   let stations = [];
@@ -486,7 +486,29 @@ export async function createRainGaugeLayer() {
     return { layer: group, label: 'Rain Gauges (no TMD data)', available: false, count: 0 };
   }
 
-  for (const station of stations) {
+  // TMD publishes the whole national network; only the handful inside the
+  // study area are reference data for this map, and the rest just clutter it.
+  //
+  // The test is "inside or just offshore", not strictly inside: coastal gauges
+  // sit on piers and reclaimed land outside the land polygon. Laem Chabang,
+  // on its deep-sea port, is a couple of kilometres out and would otherwise
+  // be dropped.
+  const COASTAL_TOLERANCE_DEG = 0.03;
+  const nearProvince = (lat, lng) => {
+    if (isInside(lat, lng)) {
+      return true;
+    }
+
+    const d = COASTAL_TOLERANCE_DEG;
+    return [
+      [d, 0], [-d, 0], [0, d], [0, -d],
+      [d, d], [d, -d], [-d, d], [-d, -d]
+    ].some(([dy, dx]) => isInside(lat + dy, lng + dx));
+  };
+
+  const local = isInside ? stations.filter((s) => nearProvince(s.lat, s.lng)) : stations;
+
+  for (const station of local) {
     const style = gaugeStyleFor(station.rainMm);
 
     const marker = L.circleMarker([station.lat, station.lng], {
@@ -526,8 +548,9 @@ export async function createRainGaugeLayer() {
     layer: group,
     label: 'Rain Gauges (TMD)',
     available: true,
-    count: stations.length,
-    stations
+    count: local.length,
+    totalCount: stations.length,
+    stations: local
   };
 }
 
