@@ -142,6 +142,17 @@ export const config = {
   // TMD only allows its own origin in CORS, so its JSON goes through the dev
   // server proxy declared in vite.config.js.
   tmdProxyPath: env.VITE_TMD_PROXY_PATH || '/tmd',
+  // OAuth token for TMD's nwpapi grid forecast. With it the forecast layer
+  // draws TMD's own ~3 km grid; without it, the keyless fallback provider.
+  tmdToken: env.VITE_TMD_TOKEN || '',
+  // 2 = hourly, 72 h, ~3 km. 1 = 3-hourly, 10 days, ~9 km.
+  tmdForecastDomain: readNumber(env.VITE_TMD_DOMAIN, 2, { min: 1, max: 2 }),
+  // Fallback grid: points per side over the study bounds, and how many days.
+  forecastGridSteps: readNumber(env.VITE_FORECAST_GRID, 10, { min: 2, max: 20 }),
+  forecastDays: readNumber(env.VITE_FORECAST_DAYS, 3, { min: 1, max: 10 }),
+  forecastGridOpacity: readNumber(env.VITE_FORECAST_OPACITY, 0.5, { min: 0.05, max: 1 }),
+  // Ceiling on drawn forecast cells; TMD at 3 km over the province exceeds it.
+  forecastMaxCells: readNumber(env.VITE_FORECAST_MAX_CELLS, 1500, { min: 50, max: 20000 }),
   // TMD's published demo credentials. Register at data.tmd.go.th for your own.
   tmdUid: env.VITE_TMD_UID || 'api',
   tmdUkey: env.VITE_TMD_UKEY || 'api12345',

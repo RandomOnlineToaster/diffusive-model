@@ -67,9 +67,26 @@ Both sources work without registration, but they have quirks worth knowing:
   published demo pair; register for your own at
   <https://data.tmd.go.th/>.
 
-The forecast endpoint used here reports one **chance of rain** per province
-per day. TMD also publishes a high-resolution grid forecast (2 km, hourly, 72 h)
-through its `nwpapi`, which needs an OAuth token — not wired up yet.
+### Forecast resolution
+
+The rain forecast layer draws a **grid** of cells with an hour-by-hour slider,
+from whichever provider is available:
+
+| Provider | Resolution | Horizon | Needs |
+| --- | --- | --- | --- |
+| TMD `nwpapi` domain 2 | ~3 km, hourly | 72 h | OAuth token |
+| TMD `nwpapi` domain 1 | ~9 km, 3-hourly | 10 days | OAuth token |
+| Open-Meteo (fallback) | ~8 km, hourly | 3 days | nothing |
+
+Set `VITE_TMD_TOKEN` and the layer switches to TMD automatically; the label
+and slider name the live source. If TMD errors, it falls back rather than
+losing the layer. Without any grid, it drops to TMD's keyless province
+outlook — one chance-of-rain figure per province per day, tinting the whole
+boundary, which is all that endpoint publishes.
+
+TMD's docs warn that a wide box pulls a lot of data — the province at 3 km is
+roughly ten thousand points — so cells are thinned evenly to
+`VITE_FORECAST_MAX_CELLS`.
 
 ## Configuration
 
@@ -83,6 +100,6 @@ the bundle.
 
 - Elevation: Copernicus GLO-30 (COP30) via OpenTopography
 - Cloud and observed rain: JAXA Global Satellite Mapping of Precipitation (GSMaP)
-- Rainfall forecast: Thai Meteorological Department
+- Rainfall forecast: Thai Meteorological Department, with Open-Meteo as a keyless fallback
 - Roads, waterways, water bodies: OpenStreetMap contributors (ODbL)
 - Drainage pipes and sensor stations: SMART GIS database export

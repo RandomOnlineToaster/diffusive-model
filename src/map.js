@@ -113,11 +113,15 @@ export async function initializeMap() {
   // Live weather: satellite tiles need no fetch, the TMD forecast does.
   const cloudCover = createCloudLayer();
   const satelliteRain = createSatelliteRainLayer();
-  const rainForecast = await createRainForecastLayer({ boundary: chonburiBoundary });
+  const rainForecast = await createRainForecastLayer({
+    boundary: chonburiBoundary,
+    bounds: dem.bounds
+  });
   console.info(
     `Weather: GSMaP frame ${cloudCover.frame.year}-${cloudCover.frame.month}-` +
       `${cloudCover.frame.day} ${cloudCover.frame.hour}:00 UTC, ` +
-      `TMD forecast ${rainForecast.available ? 'loaded' : 'unavailable'}`
+      `rain forecast ${rainForecast.available ? rainForecast.source || 'province outlook' : 'unavailable'}` +
+      `${rainForecast.gridded ? ' (gridded)' : ''}`
   );
   satelliteRain.updateBlur(map.getZoom());
   map.on('zoomend', () => satelliteRain.updateBlur(map.getZoom()));

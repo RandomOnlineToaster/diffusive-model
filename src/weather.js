@@ -1,5 +1,6 @@
 import L from 'leaflet';
 import { config } from './config.js';
+import { createForecastGridLayer, loadForecastGrid } from './forecast.js';
 
 // Live weather layers, from two public sources.
 //
@@ -135,7 +136,20 @@ function parseThaiDate(text) {
  * popup - not a rainfall field. The high-resolution grid forecast TMD also
  * publishes needs an OAuth token; see .env.local.
  */
-export async function createRainForecastLayer({ boundary, provinceName = 'Chonburi' } = {}) {
+export async function createRainForecastLayer({ boundary, bounds, provinceName = 'Chonburi' } = {}) {
+  // A real grid beats one figure for the whole province, so try that first
+  // and keep the province outlook as the fallback.
+  if (bounds) {
+    try {
+      const grid = await loadForecastGrid(bounds);
+      if (grid?.points?.length && grid.times.length) {
+        return buildGridForecastLayer(grid);
+      }
+    } catch (error) {
+      console.warn('Gridded forecast unavailable, using province outlook:', error.message);
+    }
+  }
+
   const group = L.layerGroup();
 
   let forecast = null;
@@ -321,5 +335,67 @@ async function loadProvinceForecast(provinceName) {
     issued: payload?.header?.LastBuildDate || 'unknown',
     days,
     attribution: ATTRIBUTION_TMD
+  };
+}
+
+/**
+ * The gridded view: coloured cells plus an hour-by-hour slider.
+ *
+ * Same control furniture as the province fallback below it, so the layer
+ * behaves identically whichever provider answered.
+ */
+function buildGridForecastLayer(grid) {
+  const { group, showStep, stepCount } = createForecastGridLayer(grid);
+
+  let sliderLabel = null;
+  let current = 0;
+
+  function applyStep(index) {
+    current = index;
+    const { time, peak } = showStep(index);
+    if (sliderLabel) {
+      sliderLabel.textContent = `${time} · peak ${peak.toFixed(1)} mm/h`;
+    }
+  }
+
+  const TimeControl = L.Control.extend({
+    options: { position: 'topleft' },
+
+    onAdd() {
+      const container = L.DomUtil.create('div', 'wx-time-control');
+      container.innerHTML =
+        `<span class="wx-time-title">${grid.source} forecast</span>` +
+        `<input type="range" min="0" max="${stepCount - 1}" step="1" value="${current}" />` +
+        '<span class="wx-time-label"></span>' +
+        `<span class="wx-time-res">${grid.resolutionText}</span>`;
+
+      L.DomEvent.disableClickPropagation(container);
+      L.DomEvent.disableScrollPropagation(container);
+
+      const input = container.querySelector('input');
+      sliderLabel = container.querySelector('.wx-time-label');
+      input.addEventListener('input', () => applyStep(Number(input.value)));
+      applyStep(current);
+      return container;
+    },
+
+    onRemove() {
+      sliderLabel = null;
+    }
+  });
+
+  const timeControl = new TimeControl();
+  group.on('add', (event) => timeControl.addTo(event.target._map));
+  group.on('remove', () => timeControl.remove());
+
+  applyStep(0);
+
+  return {
+    layer: group,
+    label: `Rain Forecast (${grid.source})`,
+    available: true,
+    gridded: true,
+    source: grid.source,
+    forecast: null
   };
 }

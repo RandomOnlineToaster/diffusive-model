@@ -740,6 +740,14 @@ select {
   accent-color: var(--accent);
 }
 
+.wx-time-res {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
 .wx-time-label {
   min-width: 12.5em;
   font-variant-numeric: tabular-nums;
