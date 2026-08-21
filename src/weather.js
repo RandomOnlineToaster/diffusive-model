@@ -58,7 +58,11 @@ function frameLabel(frame) {
 export function createCloudLayer() {
   const frame = latestGsmapFrame();
 
+  // The tiles are white clouds over alpha; on a light basemap that is
+  // invisible. The wx-cloud class inverts them, so cloud reads as grey
+  // shading whose darkness is the cloud thickness.
   const layer = L.tileLayer(gsmapUrl('gsmap_tile_ir.py', 'ir', frame), {
+    className: 'wx-cloud',
     opacity: config.cloudLayerOpacity,
     maxNativeZoom: GSMAP_MAX_NATIVE_ZOOM,
     attribution: ATTRIBUTION_GSMAP,
@@ -75,7 +79,12 @@ export function createCloudLayer() {
 export function createSatelliteRainLayer() {
   const frame = latestGsmapFrame();
 
+  // The server rasterises the 0.1-degree grid into hard opaque squares, so
+  // the blockiness is baked into the tile. A blur on the layer container
+  // (never per tile - that shows seams) melts the squares into a gradient;
+  // the radius tracks how many pixels one grid cell spans at this zoom.
   const layer = L.tileLayer(gsmapUrl('tile_rain.py', 'rain', frame), {
+    className: 'wx-rain',
     opacity: config.rainLayerOpacity,
     maxNativeZoom: GSMAP_MAX_NATIVE_ZOOM,
     attribution: ATTRIBUTION_GSMAP,
@@ -83,7 +92,18 @@ export function createSatelliteRainLayer() {
       'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
   });
 
-  return { layer, label: 'Rain Now (satellite)', frame };
+  return {
+    layer,
+    label: 'Rain Now (satellite)',
+    frame,
+
+    /** Match the smoothing to the on-screen size of one 0.1-degree cell. */
+    updateBlur(zoom) {
+      const cellPx = (Math.pow(2, zoom) * 256) / 3600;
+      const blur = Math.min(14, Math.max(1.5, cellPx / 3));
+      document.documentElement.style.setProperty('--wx-rain-blur', blur.toFixed(1) + 'px');
+    }
+  };
 }
 
 // Forecast rain chance, coloured the way the flood layers are: green is dry,
@@ -137,14 +157,16 @@ export async function createRainForecastLayer({ boundary, provinceName = 'Chonbu
   const today = forecast.days[0];
   const style = forecastStyleFor(today.rainChance);
 
+  // The province boundary layer is already on screen in orange, so a faint
+  // same-coloured outline disappeared entirely. A solid tint plus an
+  // always-visible chip makes the forecast unmissable at any zoom.
   const shape = L.geoJSON(boundary, {
     style: {
       color: style.color,
-      weight: 2,
+      weight: 2.5,
       fillColor: style.color,
-      // Deliberately faint: this sits over every other layer's geometry.
-      fillOpacity: 0.14,
-      dashArray: '6 4'
+      fillOpacity: 0.3,
+      dashArray: '8 6'
     }
   });
 
@@ -152,8 +174,24 @@ export async function createRainForecastLayer({ boundary, provinceName = 'Chonbu
     `Rain forecast today: <strong>${today.rainChance}%</strong> (${style.text})`,
     { sticky: true }
   );
-  shape.bindPopup(forecastPopup(forecast), { maxWidth: 320 });
+
+  const popup = forecastPopup(forecast);
+  shape.bindPopup(popup, { maxWidth: 320 });
   group.addLayer(shape);
+
+  const chip = L.marker(shape.getBounds().getCenter(), {
+    interactive: true,
+    keyboard: false,
+    icon: L.divIcon({
+      className: 'wx-chip-anchor',
+      html:
+        `<span class="wx-chip" style="border-color:${style.color}">` +
+        `Rain today: <strong>${today.rainChance}%</strong></span>`,
+      iconSize: null
+    })
+  });
+  chip.bindPopup(popup, { maxWidth: 320 });
+  group.addLayer(chip);
 
   return {
     layer: group,

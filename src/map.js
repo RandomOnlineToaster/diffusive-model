@@ -119,6 +119,8 @@ export async function initializeMap() {
       `${cloudCover.frame.day} ${cloudCover.frame.hour}:00 UTC, ` +
       `TMD forecast ${rainForecast.available ? 'loaded' : 'unavailable'}`
   );
+  satelliteRain.updateBlur(map.getZoom());
+  map.on('zoomend', () => satelliteRain.updateBlur(map.getZoom()));
 
   // Couple streets to the underground pipes wherever both networks exist.
   // Behind a flag until the pipe database carries real cross-sections and
