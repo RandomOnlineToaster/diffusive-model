@@ -721,6 +721,38 @@ select {
   filter: blur(var(--wx-rain-blur, 3px)) saturate(1.15);
 }
 
+/* Day slider, shown while the TMD forecast layer is on. */
+.wx-time-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 2px 10px rgba(20, 24, 31, 0.1);
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.wx-time-control input[type='range'] {
+  width: 150px;
+  accent-color: var(--accent);
+}
+
+.wx-time-label {
+  min-width: 12.5em;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.wx-forecast tr.wx-selected td {
+  background: rgba(37, 99, 235, 0.08);
+  font-weight: 700;
+}
+
 /* Forecast chip: always readable, whatever is underneath. */
 .wx-chip-anchor {
   background: transparent;

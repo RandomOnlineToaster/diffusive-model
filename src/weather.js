@@ -154,44 +154,91 @@ export async function createRainForecastLayer({ boundary, provinceName = 'Chonbu
     };
   }
 
-  const today = forecast.days[0];
-  const style = forecastStyleFor(today.rainChance);
-
   // The province boundary layer is already on screen in orange, so a faint
   // same-coloured outline disappeared entirely. A solid tint plus an
   // always-visible chip makes the forecast unmissable at any zoom.
   const shape = L.geoJSON(boundary, {
-    style: {
-      color: style.color,
-      weight: 2.5,
-      fillColor: style.color,
-      fillOpacity: 0.3,
-      dashArray: '8 6'
-    }
+    style: { weight: 2.5, fillOpacity: 0.3, dashArray: '8 6' }
   });
-
-  shape.bindTooltip(
-    `Rain forecast today: <strong>${today.rainChance}%</strong> (${style.text})`,
-    { sticky: true }
-  );
-
-  const popup = forecastPopup(forecast);
-  shape.bindPopup(popup, { maxWidth: 320 });
+  shape.bindTooltip('', { sticky: true });
+  shape.bindPopup('', { maxWidth: 320 });
   group.addLayer(shape);
 
   const chip = L.marker(shape.getBounds().getCenter(), {
     interactive: true,
     keyboard: false,
-    icon: L.divIcon({
-      className: 'wx-chip-anchor',
-      html:
-        `<span class="wx-chip" style="border-color:${style.color}">` +
-        `Rain today: <strong>${today.rainChance}%</strong></span>`,
-      iconSize: null
-    })
+    icon: L.divIcon({ className: 'wx-chip-anchor', html: '', iconSize: null })
   });
-  chip.bindPopup(popup, { maxWidth: 320 });
+  chip.bindPopup('', { maxWidth: 320 });
   group.addLayer(chip);
+
+  // One slider step per forecast day. The endpoint in use is daily-only;
+  // with an nwpapi OAuth token the same control would carry hourly steps.
+  let sliderLabel = null;
+  let sliderInput = null;
+
+  function applyDay(index) {
+    const day = forecast.days[index];
+    const style = forecastStyleFor(day.rainChance);
+    const when = index === 0 ? 'today' : shortDate(day);
+
+    shape.setStyle({ color: style.color, fillColor: style.color });
+    shape.setTooltipContent(
+      `Rain ${when}: <strong>${day.rainChance}%</strong> (${style.text})`
+    );
+
+    const popup = forecastPopup(forecast, index);
+    shape.setPopupContent(popup);
+    chip.setPopupContent(popup);
+    chip.setIcon(
+      L.divIcon({
+        className: 'wx-chip-anchor',
+        html:
+          `<span class="wx-chip" style="border-color:${style.color}">` +
+          `Rain ${when}: <strong>${day.rainChance}%</strong></span>`,
+        iconSize: null
+      })
+    );
+
+    if (sliderLabel) {
+      sliderLabel.textContent = `${shortDate(day)} · ${day.rainChance}% (${style.text})`;
+    }
+  }
+
+  const TimeControl = L.Control.extend({
+    options: { position: 'topleft' },
+
+    onAdd() {
+      const container = L.DomUtil.create('div', 'wx-time-control');
+      container.innerHTML =
+        '<span class="wx-time-title">TMD forecast</span>' +
+        `<input type="range" min="0" max="${forecast.days.length - 1}" step="1" value="0" />` +
+        '<span class="wx-time-label"></span>';
+
+      // The slider must not drag or zoom the map underneath it.
+      L.DomEvent.disableClickPropagation(container);
+      L.DomEvent.disableScrollPropagation(container);
+
+      sliderInput = container.querySelector('input');
+      sliderLabel = container.querySelector('.wx-time-label');
+      sliderInput.addEventListener('input', () => applyDay(Number(sliderInput.value)));
+      applyDay(Number(sliderInput.value));
+      return container;
+    },
+
+    onRemove() {
+      sliderLabel = null;
+      sliderInput = null;
+    }
+  });
+
+  // The control follows the layer checkbox: on the map only while the
+  // forecast is.
+  const timeControl = new TimeControl();
+  group.on('add', (event) => timeControl.addTo(event.target._map));
+  group.on('remove', () => timeControl.remove());
+
+  applyDay(0);
 
   return {
     layer: group,
@@ -201,19 +248,23 @@ export async function createRainForecastLayer({ boundary, provinceName = 'Chonbu
   };
 }
 
-function forecastPopup(forecast) {
+function shortDate(day) {
+  return day.date.toLocaleDateString('en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'UTC'
+  });
+}
+
+function forecastPopup(forecast, selectedIndex = 0) {
   const rows = forecast.days
-    .map((day) => {
+    .map((day, index) => {
       const style = forecastStyleFor(day.rainChance);
-      const date = day.date.toLocaleDateString('en-GB', {
-        weekday: 'short',
-        day: 'numeric',
-        month: 'short',
-        timeZone: 'UTC'
-      });
+      const date = shortDate(day);
 
       return (
-        `<tr><td>${date}</td>` +
+        `<tr${index === selectedIndex ? ' class="wx-selected"' : ''}><td>${date}</td>` +
         `<td><span class="wx-dot" style="background:${style.color}"></span>${day.rainChance}%</td>` +
         `<td>${day.minTemp}-${day.maxTemp}°C</td>` +
         `<td>${day.description}</td></tr>`
