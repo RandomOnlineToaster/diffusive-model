@@ -705,6 +705,44 @@ select {
   pointer-events: none;
 }
 
+/* --- Weather forecast popup --- */
+
+.wx-forecast {
+  width: 100%;
+  margin-top: 6px;
+  border-collapse: collapse;
+  font-size: 0.74rem;
+}
+
+.wx-forecast th {
+  text-align: left;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.wx-forecast th,
+.wx-forecast td {
+  padding: 3px 6px 3px 0;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.wx-forecast tr:last-child td {
+  border-bottom: none;
+}
+
+.wx-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 50%;
+  vertical-align: baseline;
+}
+
 /* --- Storm rain formula card --- */
 
 .panel-card--formula {

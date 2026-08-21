@@ -32,6 +32,11 @@ import { createBaseMaps, MAX_ZOOM } from './basemaps.js';
 import { createRoadFlowLayer } from './roadFlow.js';
 import { createPipeSimulation } from './pipeSim.js';
 import { createRainfallSimulator } from './rainfallSim.js';
+import {
+  createCloudLayer,
+  createRainForecastLayer,
+  createSatelliteRainLayer
+} from './weather.js';
 import { config } from './config.js';
 
 const chonburiBoundary = JSON.parse(chonburiBoundaryRaw);
@@ -104,6 +109,16 @@ export async function initializeMap() {
       createSensorStationLayer({ sensorType: 'ROAD' }),
       createRoadFlowLayer()
     ]);
+
+  // Live weather: satellite tiles need no fetch, the TMD forecast does.
+  const cloudCover = createCloudLayer();
+  const satelliteRain = createSatelliteRainLayer();
+  const rainForecast = await createRainForecastLayer({ boundary: chonburiBoundary });
+  console.info(
+    `Weather: GSMaP frame ${cloudCover.frame.year}-${cloudCover.frame.month}-` +
+      `${cloudCover.frame.day} ${cloudCover.frame.hour}:00 UTC, ` +
+      `TMD forecast ${rainForecast.available ? 'loaded' : 'unavailable'}`
+  );
 
   // Couple streets to the underground pipes wherever both networks exist.
   // Behind a flag until the pipe database carries real cross-sections and
@@ -394,11 +409,24 @@ export async function initializeMap() {
     { collapsed: false }
   );
 
+  const weatherControl = L.control.layers(
+    null,
+    {
+      [cloudCover.label]: cloudCover.layer,
+      [satelliteRain.label]: satelliteRain.layer,
+      [rainForecast.available ? rainForecast.label : wipLabel(rainForecast.label)]:
+        rainForecast.layer
+    },
+    { collapsed: false }
+  );
+
   geographyControl.addTo(map);
   simulationControl.addTo(map);
+  weatherControl.addTo(map);
   matchLayerControlWidths();
   labelLayerControl(geographyControl, 'Geography');
   labelLayerControl(simulationControl, 'Water Simulation');
+  labelLayerControl(weatherControl, 'Weather');
 
   map.on('mousemove', (event) => {
     mouseCoordinates.update(event.latlng);

@@ -12,6 +12,10 @@ storms and routes the resulting water across terrain and streets.
   backs water up onto its neighbours instead of swallowing it forever.
 - **Flow paths / accumulation / direction** — D8 routing on the DEM analysis
   grid, for the catchment-scale picture.
+- **Weather** — live satellite cloud cover and observed rain from
+  [JAXA GSMaP](https://sharaku.eorc.jaxa.jp/GSMaP/), plus the province
+  rainfall forecast from the
+  [Thai Meteorological Department](https://data.tmd.go.th/).
 - **Infrastructure layers** — rivers, water bodies, water gates, drainage
   pipes and sensor stations.
 
@@ -47,6 +51,26 @@ GitHub's file limit, and everything is reproducible.
 | `npm run fetch:rivers` / `fetch:water` | Download OSM waterways and water bodies |
 | `npm run build:pattaya` | Build pipe and sensor layers from the GIS exports in `data/pattaya` |
 
+## Weather data
+
+Both sources work without registration, but they have quirks worth knowing:
+
+- **GSMaP** (cloud + observed rain) serves ordinary XYZ tiles, so they drop
+  straight into Leaflet. The product is hourly and lands a few hours behind
+  real time, and JAXA's "latest frame" marker is not readable from a browser
+  (no CORS header), so `VITE_GSMAP_LATENCY_H` controls how far back to look.
+  Grids are 0.1° (~11 km) — the tiles upscale past that, they do not sharpen.
+- **TMD** allows only its own site in CORS, so its JSON is proxied by the dev
+  server (`/tmd` → `data.tmd.go.th`, see `vite.config.js`). A static
+  production deploy has no proxy, so the forecast layer reports itself
+  unavailable instead of failing silently. The credentials default to TMD's
+  published demo pair; register for your own at
+  <https://data.tmd.go.th/>.
+
+The forecast endpoint used here reports one **chance of rain** per province
+per day. TMD also publishes a high-resolution grid forecast (2 km, hourly, 72 h)
+through its `nwpapi`, which needs an OAuth token — not wired up yet.
+
 ## Configuration
 
 Every tunable lives in `.env.local`, documented in place — grid sizes, flow
@@ -58,5 +82,7 @@ the bundle.
 ## Data sources
 
 - Elevation: Copernicus GLO-30 (COP30) via OpenTopography
+- Cloud and observed rain: JAXA Global Satellite Mapping of Precipitation (GSMaP)
+- Rainfall forecast: Thai Meteorological Department
 - Roads, waterways, water bodies: OpenStreetMap contributors (ODbL)
 - Drainage pipes and sensor stations: SMART GIS database export
