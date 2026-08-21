@@ -35,8 +35,7 @@ import { createRainfallSimulator } from './rainfallSim.js';
 import {
   createCloudLayer,
   createRainForecastLayer,
-  createRainGaugeLayer,
-  createSatelliteRainLayer
+  createRainGaugeLayer
 } from './weather.js';
 import { config } from './config.js';
 
@@ -112,8 +111,7 @@ export async function initializeMap() {
     ]);
 
   // Live weather: satellite tiles need no fetch, the TMD forecast does.
-  const cloudCover = createCloudLayer();
-  const satelliteRain = createSatelliteRainLayer();
+  const cloudCover = createCloudLayer({ bounds: dem.bounds });
   const [rainForecast, rainGauges] = await Promise.all([
     createRainForecastLayer({ boundary: chonburiBoundary, bounds: dem.bounds }),
     createRainGaugeLayer({ isInside: isInsideProvince })
@@ -125,8 +123,8 @@ export async function initializeMap() {
       `${rainForecast.gridded ? ' (gridded)' : ''}, ` +
       `${rainGauges.count} of ${rainGauges.totalCount} TMD rain gauges in area`
   );
-  satelliteRain.updateBlur(map.getZoom());
-  map.on('zoomend', () => satelliteRain.updateBlur(map.getZoom()));
+  cloudCover.updateBlur(map.getZoom());
+  map.on('zoomend', () => cloudCover.updateBlur(map.getZoom()));
 
   // Couple streets to the underground pipes wherever both networks exist.
   // Behind a flag until the pipe database carries real cross-sections and
@@ -421,7 +419,6 @@ export async function initializeMap() {
     null,
     {
       [cloudCover.label]: cloudCover.layer,
-      [satelliteRain.label]: satelliteRain.layer,
       [rainForecast.available ? rainForecast.label : wipLabel(rainForecast.label)]:
         rainForecast.layer,
       [rainGauges.available ? rainGauges.label : wipLabel(rainGauges.label)]: rainGauges.layer

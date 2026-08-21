@@ -138,7 +138,6 @@ export const config = {
   // the browser (no CORS header), so the lag is a setting.
   gsmapLatencyHours: readNumber(env.VITE_GSMAP_LATENCY_H, 5, { min: 1, max: 48 }),
   cloudLayerOpacity: readNumber(env.VITE_CLOUD_OPACITY, 0.65, { min: 0.05, max: 1 }),
-  rainLayerOpacity: readNumber(env.VITE_SAT_RAIN_OPACITY, 0.65, { min: 0.05, max: 1 }),
   // TMD only allows its own origin in CORS, so its JSON goes through the dev
   // server proxy declared in vite.config.js.
   tmdProxyPath: env.VITE_TMD_PROXY_PATH || '/tmd',

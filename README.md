@@ -12,7 +12,7 @@ storms and routes the resulting water across terrain and streets.
   backs water up onto its neighbours instead of swallowing it forever.
 - **Flow paths / accumulation / direction** — D8 routing on the DEM analysis
   grid, for the catchment-scale picture.
-- **Weather** — live satellite cloud cover and observed rain from
+- **Weather** — live satellite cloud cover from
   [JAXA GSMaP](https://sharaku.eorc.jaxa.jp/GSMaP/), a gridded rainfall
   forecast with an hourly slider, and measured rainfall from the
   [Thai Meteorological Department](https://data.tmd.go.th/)'s own rain
@@ -56,11 +56,13 @@ GitHub's file limit, and everything is reproducible.
 
 Both sources work without registration, but they have quirks worth knowing:
 
-- **GSMaP** (cloud + observed rain) serves ordinary XYZ tiles, so they drop
-  straight into Leaflet. The product is hourly and lands a few hours behind
-  real time, and JAXA's "latest frame" marker is not readable from a browser
-  (no CORS header), so `VITE_GSMAP_LATENCY_H` controls how far back to look.
-  Grids are 0.1° (~11 km) — the tiles upscale past that, they do not sharpen.
+- **GSMaP** (cloud cover) serves ordinary XYZ tiles, so they drop straight
+  into Leaflet. The product is hourly and lands a few hours behind real time,
+  and JAXA's "latest frame" marker is not readable from a browser (no CORS
+  header), so `VITE_GSMAP_LATENCY_H` controls how far back to look. Grids are
+  0.1° (~11 km) — the tiles upscale past that, they do not sharpen. The layer
+  is clipped to the DEM bounds: the tiles are global, and unbounded Leaflet
+  fetches and composites them across the whole visible world.
 - **TMD** allows only its own site in CORS, so its JSON is proxied by the dev
   server (`/tmd` → `data.tmd.go.th`, see `vite.config.js`). A static
   production deploy has no proxy, so the forecast layer reports itself
@@ -126,7 +128,7 @@ the bundle.
 ## Data sources
 
 - Elevation: Copernicus GLO-30 (COP30) via OpenTopography
-- Cloud and observed rain: JAXA Global Satellite Mapping of Precipitation (GSMaP)
+- Cloud cover: JAXA Global Satellite Mapping of Precipitation (GSMaP)
 - Rainfall forecast: Thai Meteorological Department, with Open-Meteo as a keyless fallback
 - Roads, waterways, water bodies: OpenStreetMap contributors (ODbL)
 - Drainage pipes and sensor stations: SMART GIS database export

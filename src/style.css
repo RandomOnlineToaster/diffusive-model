@@ -711,14 +711,7 @@ select {
    basemap. Inverted, cloud reads as grey shading whose darkness is the
    thickness. (On the dark Satellite basemap this costs some contrast.) */
 .wx-cloud {
-  filter: invert(1) blur(calc(var(--wx-rain-blur, 3px) * 0.6));
-}
-
-/* GSMaP rain arrives as hard 0.1-degree squares baked into the tiles. The
-   blur sits on the layer container so the assembled mosaic smooths as one
-   image with no per-tile seams; map.js scales the radius with zoom. */
-.wx-rain {
-  filter: blur(var(--wx-rain-blur, 3px)) saturate(1.15);
+  filter: invert(1) blur(var(--wx-blur, 3px));
 }
 
 /* Day slider, shown while the TMD forecast layer is on. */

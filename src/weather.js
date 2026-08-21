@@ -56,12 +56,14 @@ function gsmapUrl(script, product, frame) {
   );
 }
 
-function frameLabel(frame) {
-  return `${frame.year}-${frame.month}-${frame.day} ${frame.hour}:00 UTC`;
-}
-
-/** Infrared cloud-top imagery: where the cloud is, rain or not. */
-export function createCloudLayer() {
+/**
+ * Infrared cloud-top imagery: where the cloud is, rain or not.
+ *
+ * Bounded to the study area. GSMaP tiles are global, and without a bound
+ * Leaflet fetches and paints them across the whole visible world - a lot of
+ * requests and a lot of compositing for cloud nobody is looking at.
+ */
+export function createCloudLayer({ bounds } = {}) {
   const frame = latestGsmapFrame();
 
   // The tiles are white clouds over alpha; on a light basemap that is
@@ -72,42 +74,29 @@ export function createCloudLayer() {
     opacity: config.cloudLayerOpacity,
     maxNativeZoom: GSMAP_MAX_NATIVE_ZOOM,
     attribution: ATTRIBUTION_GSMAP,
+    bounds: bounds
+      ? L.latLngBounds([bounds.south, bounds.west], [bounds.north, bounds.east])
+      : undefined,
     // Blank ocean/edge tiles are normal here; a missing tile must not leave a
     // broken-image box on the map.
     errorTileUrl:
       'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
   });
 
-  return { layer, label: 'Cloud Cover', frame };
-}
-
-/** Observed rain rate at the same frame, so cloud and rain line up. */
-export function createSatelliteRainLayer() {
-  const frame = latestGsmapFrame();
-
-  // The server rasterises the 0.1-degree grid into hard opaque squares, so
-  // the blockiness is baked into the tile. A blur on the layer container
-  // (never per tile - that shows seams) melts the squares into a gradient;
-  // the radius tracks how many pixels one grid cell spans at this zoom.
-  const layer = L.tileLayer(gsmapUrl('tile_rain.py', 'rain', frame), {
-    className: 'wx-rain',
-    opacity: config.rainLayerOpacity,
-    maxNativeZoom: GSMAP_MAX_NATIVE_ZOOM,
-    attribution: ATTRIBUTION_GSMAP,
-    errorTileUrl:
-      'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
-  });
-
   return {
     layer,
-    label: 'Rain Now (satellite)',
+    label: 'Cloud Cover',
     frame,
 
-    /** Match the smoothing to the on-screen size of one 0.1-degree cell. */
+    /**
+     * Soften the 0.1-degree squares by however many pixels one covers at this
+     * zoom. The blur lives on the layer container, never per tile, so the
+     * mosaic smooths as one image without seams at the tile joins.
+     */
     updateBlur(zoom) {
       const cellPx = (Math.pow(2, zoom) * 256) / 3600;
-      const blur = Math.min(14, Math.max(1.5, cellPx / 3));
-      document.documentElement.style.setProperty('--wx-rain-blur', blur.toFixed(1) + 'px');
+      const blur = Math.min(9, Math.max(1, cellPx / 5));
+      document.documentElement.style.setProperty('--wx-blur', blur.toFixed(1) + 'px');
     }
   };
 }
