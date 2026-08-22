@@ -59,6 +59,27 @@ function forecastColor(value) {
   return FORECAST_STOPS[FORECAST_STOPS.length - 1].color;
 }
 
+/**
+ * Grow a bounds about its centre.
+ *
+ * The forecast is asked for a wider area than the study bounds so a front
+ * moving in from the Gulf or from Rayong is on screen before it arrives,
+ * rather than appearing at the edge already overhead.
+ */
+function expandBounds(bounds, scale) {
+  const midLat = (bounds.north + bounds.south) / 2;
+  const midLng = (bounds.east + bounds.west) / 2;
+  const halfLat = ((bounds.north - bounds.south) * scale) / 2;
+  const halfLng = ((bounds.east - bounds.west) * scale) / 2;
+
+  return {
+    south: Math.max(-85, midLat - halfLat),
+    north: Math.min(85, midLat + halfLat),
+    west: midLng - halfLng,
+    east: midLng + halfLng
+  };
+}
+
 /** A regular lat/lng grid over the study area, as request coordinates. */
 function sampleGrid(bounds, steps) {
   const lats = [];
@@ -80,11 +101,12 @@ function sampleGrid(bounds, steps) {
  * TMD's own grid forecast. domain 2 is hourly at ~3 km out to 72 hours;
  * domain 1 is 3-hourly at ~9 km out to ten days.
  */
-async function loadTmdGrid(bounds) {
+async function loadTmdGrid(rawBounds) {
   if (!config.tmdToken) {
     return null;
   }
 
+  const bounds = expandBounds(rawBounds, config.tmdAreaScale);
   const domain = config.tmdForecastDomain;
   const url =
     `${config.tmdProxyPath}/nwpapi/v1/forecast/area/box` +
@@ -147,7 +169,8 @@ async function loadTmdGrid(bounds) {
 }
 
 /** Keyless fallback. One request carries every grid point. */
-async function loadOpenMeteoGrid(bounds) {
+async function loadOpenMeteoGrid(rawBounds) {
+  const bounds = expandBounds(rawBounds, config.forecastAreaScale);
   const steps = config.forecastGridSteps;
   const { lats, lngs } = sampleGrid(bounds, steps);
 

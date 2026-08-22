@@ -227,6 +227,21 @@ select {
   color: var(--text-muted);
 }
 
+/* Volume and litres share a line: the cubic metres stay the headline, the
+   litres keep their smaller muted style rather than competing with it. */
+.result-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.result-liters {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .layer-list {
   margin: 10px 0 0;
   padding-left: 17px;
@@ -239,6 +254,24 @@ select {
 }
 
 /* --- Leaflet overlays --- */
+
+/* Leaflet gives the scale its own 5px margin while every other control gets
+   10px, so it sat proud of the coordinate readout beneath it. */
+.leaflet-control-scale {
+  margin-left: 10px !important;
+  margin-bottom: 8px !important;
+}
+
+.leaflet-control-scale-line {
+  padding: 4px 10px !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px;
+  background: var(--surface) !important;
+  box-shadow: 0 2px 8px rgba(20, 24, 31, 0.08);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.3;
+}
 
 .mouse-coordinates {
   padding: 5px 10px;
@@ -712,6 +745,19 @@ select {
 /* GSMaP infrared tiles are white clouds over alpha - invisible on a light
    basemap. Inverted, cloud reads as grey shading whose darkness is the
    thickness. (On the dark Satellite basemap this costs some contrast.) */
+/* The forecast heatmap: a light blur finishes the smoothing the canvas
+   upscale starts, so cell corners never show through. Leaflet leaves an
+   image overlay hit-testable even when non-interactive, which swallowed
+   hovers meant for the rain gauges underneath it. */
+.wx-heat {
+  filter: blur(3px);
+  pointer-events: none;
+}
+
+.wx-heat-tip {
+  font-size: 0.74rem;
+}
+
 .wx-cloud {
   filter: invert(1) blur(var(--wx-blur, 3px));
 }

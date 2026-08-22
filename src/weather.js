@@ -135,9 +135,15 @@ export async function createRainForecastLayer({ boundary, bounds, provinceName =
   // and keep the province outlook as the fallback.
   if (bounds) {
     try {
-      const grid = await loadForecastGrid(bounds);
+      // The province outlook rides along for its chance-of-rain figure, which
+      // the grid does not carry; a failure there must not lose the grid.
+      const [grid, provinceOutlook] = await Promise.all([
+        loadForecastGrid(bounds),
+        loadProvinceForecast(provinceName).catch(() => null)
+      ]);
+
       if (grid?.points?.length && grid.times.length) {
-        return buildGridForecastLayer(grid);
+        return buildGridForecastLayer(grid, provinceOutlook, boundary);
       }
     } catch (error) {
       console.warn('Gridded forecast unavailable, using province outlook:', error.message);
@@ -338,7 +344,7 @@ async function loadProvinceForecast(provinceName) {
  * Same control furniture as the province fallback below it, so the layer
  * behaves identically whichever provider answered.
  */
-function buildGridForecastLayer(grid) {
+function buildGridForecastLayer(grid, provinceOutlook, boundary) {
   const { group, showStep, valueAt, stepCount } = createForecastGridLayer(grid);
 
   // The timeline is split into a day picker and an hour slider. As one slider
@@ -359,6 +365,40 @@ function buildGridForecastLayer(grid) {
     ticks: document.querySelector('#forecast-ticks')
   };
 
+  // The province chance-of-rain, shown over open ground south-east of the
+  // built-up strip so it does not sit on top of Pattaya.
+  let percentChip = null;
+  if (provinceOutlook && boundary) {
+    const outline = L.geoJSON(boundary).getBounds();
+    const south = outline.getSouth();
+    const west = outline.getWest();
+    percentChip = L.marker(
+      [
+        south + (outline.getNorth() - south) * 0.33,
+        west + (outline.getEast() - west) * 0.45
+      ],
+      {
+        interactive: false,
+        keyboard: false,
+        icon: L.divIcon({ className: 'wx-chip-anchor', html: '', iconSize: null })
+      }
+    );
+    group.addLayer(percentChip);
+  }
+
+  /** Match a forecast day to TMD's province entry for the same date. */
+  function outlookFor(date) {
+    if (!provinceOutlook) {
+      return null;
+    }
+
+    return (
+      provinceOutlook.days.find(
+        (entry) => entry.date.toISOString().slice(0, 10) === date
+      ) || null
+    );
+  }
+
   function applyStep(index) {
     const { peak } = showStep(index);
     dom.peak.textContent = `${peak.toFixed(1)} mm/h`;
@@ -370,7 +410,21 @@ function buildGridForecastLayer(grid) {
     dom.hour.min = '0';
     dom.hour.max = String(day.steps.length - 1);
     dom.hour.value = String(Math.min(Number(dom.hour.value), day.steps.length - 1));
-    dom.dayValue.textContent = day.weekday;
+    dom.dayValue.textContent = day.label;
+
+    const outlook = outlookFor(day.date);
+    if (percentChip) {
+      percentChip.setIcon(
+        L.divIcon({
+          className: 'wx-chip-anchor',
+          html: outlook
+            ? `<span class="wx-chip" style="border-color:${forecastStyleFor(outlook.rainChance).color}">` +
+              `TMD ${day.weekday}: <strong>${outlook.rainChance}%</strong> chance of rain</span>`
+            : '',
+          iconSize: null
+        })
+      );
+    }
 
     // The day's total at the wettest point. Summing the area-wide peak hour
     // by hour instead would add up rain that fell in different places, and
@@ -403,21 +457,25 @@ function buildGridForecastLayer(grid) {
   }
 
   function buildCard() {
-    dom.source.textContent = `${grid.source} · ${grid.resolutionText}`;
-    dom.day.innerHTML = days
-      .map((day, index) => `<option value="${index}">${day.label}</option>`)
-      .join('');
+    // "hourly" is already implied by the hour slider beside it.
+    dom.source.textContent = `${grid.source} · ${grid.resolutionText.split(',')[0]}`;
+    dom.day.min = '0';
+    dom.day.max = String(days.length - 1);
+    dom.day.value = '0';
     dom.gradient.style.background = legendGradient();
     dom.ticks.innerHTML =
       FORECAST_LEGEND.map((stop) => `<span>${stop.mmPerHour}</span>`).join('') +
       '<span>mm/h</span>';
 
-    dom.day.value = '0';
+    // Open on the hour it is now, which is the one anybody looks at first.
+    const nowHour = new Date().getHours();
+    const todaySteps = days[0].hours.findIndex((clock) => Number(clock.slice(0, 2)) === nowHour);
+    dom.hour.value = String(todaySteps >= 0 ? todaySteps : 0);
+
     selectDay(0);
-    dom.card.hidden = false;
   }
 
-  dom.day.addEventListener('change', () => selectDay(Number(dom.day.value)));
+  dom.day.addEventListener('input', () => selectDay(Number(dom.day.value)));
   dom.hour.addEventListener('input', () => selectHour(Number(dom.hour.value)));
 
   // An image overlay cannot carry per-cell tooltips, so the readout follows
@@ -439,18 +497,17 @@ function buildGridForecastLayer(grid) {
       .openOn(event.target);
   }
 
-  // The card belongs to the layer: it appears and disappears with it.
+  // The card is always on show - the forecast is worth reading whether or not
+  // it is drawn on the map - so only the hover readout follows the toggle.
   group.on('add', (event) => {
-    buildCard();
     event.target._map.on('mousemove', onMove);
   });
   group.on('remove', (event) => {
-    dom.card.hidden = true;
     event.target._map?.off('mousemove', onMove);
     readout.close();
   });
 
-  applyStep(0);
+  buildCard();
 
   return {
     layer: group,
@@ -568,6 +625,9 @@ export async function createRainGaugeLayer({ isInside } = {}) {
     const style = gaugeStyleFor(station.rainMm);
 
     const marker = L.circleMarker([station.lat, station.lng], {
+      // markerPane sits above the overlay pane, so a gauge stays hoverable
+      // with the forecast heatmap drawn over the same ground.
+      pane: 'markerPane',
       radius: gaugeRadius(station.rainMm),
       color: '#ffffff',
       weight: 1.5,

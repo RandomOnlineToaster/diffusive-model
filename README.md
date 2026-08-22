@@ -100,6 +100,8 @@ from whichever provider is available:
 | TMD `nwpapi` domain 1 | ~9 km, 3-hourly | 10 days | OAuth token |
 | Open-Meteo (fallback) | ~8 km, hourly | 7 days (16 max) | nothing |
 
+The forecast is fetched over a wider box than the study area — `VITE_FORECAST_AREA_SCALE=3` means a 3x3 block with the study area in the middle — so weather approaching from the Gulf or from Rayong is visible before it arrives. A 20x20 sample over that box is 400 points and about 1.7 MB; the request is a GET, and past roughly 600 points the URL grows too long to send.
+
 Set `VITE_TMD_TOKEN` and the layer switches to TMD automatically; the label
 and slider name the live source. If TMD errors, it falls back rather than
 losing the layer. Without any grid, it drops to TMD's keyless province

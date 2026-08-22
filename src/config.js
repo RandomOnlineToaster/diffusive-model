@@ -147,7 +147,14 @@ export const config = {
   // 2 = hourly, 72 h, ~3 km. 1 = 3-hourly, 10 days, ~9 km.
   tmdForecastDomain: readNumber(env.VITE_TMD_DOMAIN, 2, { min: 1, max: 2 }),
   // Fallback grid: points per side over the study bounds, and how many days.
-  forecastGridSteps: readNumber(env.VITE_FORECAST_GRID, 10, { min: 2, max: 20 }),
+  forecastGridSteps: readNumber(env.VITE_FORECAST_GRID, 20, { min: 2, max: 24 }),
+  // The forecast covers this many times the study area in each direction,
+  // centred on it, so weather approaching from outside is visible before it
+  // arrives. 3 means a 3x3 block with the study area as the middle tile.
+  forecastAreaScale: readNumber(env.VITE_FORECAST_AREA_SCALE, 3, { min: 1, max: 5 }),
+  // TMD's grid is far denser, and its docs warn about wide boxes, so its
+  // area grows more modestly than the keyless fallback's.
+  tmdAreaScale: readNumber(env.VITE_TMD_AREA_SCALE, 1.5, { min: 1, max: 5 }),
   forecastDays: readNumber(env.VITE_FORECAST_DAYS, 7, { min: 1, max: 16 }),
   forecastGridOpacity: readNumber(env.VITE_FORECAST_OPACITY, 0.5, { min: 0.05, max: 1 }),
   // Ceiling on drawn forecast cells; TMD at 3 km over the province exceeds it.

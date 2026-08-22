@@ -45,16 +45,16 @@ export function createAppLayout(root) {
         <!-- Driven by weather.js while the Rain Forecast layer is on; the
              time controls live here rather than over the map so they have
              room for a separate day and hour. -->
-        <section class="panel-card panel-card--forecast" id="forecast-card" hidden>
+        <section class="panel-card panel-card--forecast" id="forecast-card">
           <div class="sim-header">
             <h2>Rain Forecast</h2>
-            <span class="forecast-source" id="forecast-source"></span>
+            <span class="forecast-source" id="forecast-source">loading&hellip;</span>
           </div>
 
           <label class="field field--inline">
             <span>Day</span>
-            <select id="forecast-day"></select>
-            <output id="forecast-day-value"></output>
+            <input id="forecast-day" type="range" min="0" max="0" step="1" value="0" />
+            <output id="forecast-day-value">&mdash;</output>
           </label>
 
           <label class="field field--inline">
@@ -89,9 +89,9 @@ export function createAppLayout(root) {
 
             <div class="result-box">
               <span class="stat-label">Water Volume</span>
-              <strong class="stat-value" id="rainfall-result-m3">0 m³</strong>
-              <div class="result-subgrid">
-                <span id="rainfall-result-liters">0 liters</span>
+              <div class="result-line">
+                <strong class="stat-value" id="rainfall-result-m3">0 m³</strong>
+                <span class="result-liters" id="rainfall-result-liters">0 liters</span>
               </div>
             </div>
           </form>

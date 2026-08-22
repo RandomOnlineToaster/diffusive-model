@@ -201,7 +201,6 @@ export async function initializeMap() {
   const flowPathLabel = demLabel('Flow Paths');
   const contourLayerLabel = demLabel('Elevation Contours');
 
-  elevationLayer.addTo(map);
 
   const geographyControl = L.control.layers(
     baseMaps,
@@ -252,12 +251,20 @@ export async function initializeMap() {
       // An open sample popup reads live, whether or not the street layer is on.
       refreshSamplePopup();
 
-      if (!rainLayerActive || !roadFlow.dynamic) {
+      if (!roadFlow.dynamic) {
         return;
       }
 
+      // Stepped whatever the rainfall layer's checkbox says: the storm is
+      // still raining and the grid is still advancing, so the street water
+      // and the "Water on map" readout must advance with them. Only the
+      // drawing below is gated on the layer being visible.
       roadFlow.dynamic.step((lat, lng) => rainfall.intensityAt(lat, lng), dtSeconds);
       pipeSim?.step(dtSeconds);
+
+      if (!rainLayerActive) {
+        return;
+      }
 
       if (!streetRenderTimer) {
         streetRenderTimer = setTimeout(() => {
@@ -425,6 +432,10 @@ export async function initializeMap() {
     },
     { collapsed: false }
   );
+
+  // Default view: the Light basemap, the provincial outline, and the rain
+  // gauges. Everything heavier starts off so the first paint stays quick.
+  rainGauges.layer.addTo(map);
 
   geographyControl.addTo(map);
   simulationControl.addTo(map);
