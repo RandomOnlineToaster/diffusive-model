@@ -489,7 +489,7 @@ function buildGridForecastLayer(grid, provinceOutlook, boundary) {
 
   // An image overlay cannot carry per-cell tooltips, so the readout follows
   // the cursor instead - which also reads better than hovering tiny squares.
-  const readout = L.tooltip({ sticky: true, className: 'wx-heat-tip' });
+  const readout = L.tooltip({ sticky: true, direction: 'top', offset: [0, -12], className: 'wx-heat-tip' });
   function onMove(event) {
     const value = valueAt(event.latlng.lat, event.latlng.lng);
     if (value === null) {

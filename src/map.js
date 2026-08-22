@@ -13,6 +13,7 @@ import {
   createFlowAccumulationLayer,
   createFlowDirectionLayer,
   createFlowPathLayer,
+  populateFlowAccumulationLayer,
   populateFlowPathLayer
 } from './flow.js';
 import {
@@ -308,64 +309,79 @@ export async function initializeMap() {
   // goes rather than the every-cell-equal terrain view. Refreshes are throttled
   // because they rebuild polylines across the network.
   function applyFlowWeighting() {
-    const depthAt = rainLayerActive ? (lat, lng) => rainfall.depthAt(lat, lng) : null;
+    const cellAreaM2 = flowPathOptions.cellAreaM2 || 1;
+    const wantsPaths = map.hasLayer(flowPathLayer);
+    const wantsAccumulation = map.hasLayer(flowAccumulationLayer);
 
-    if (map.hasLayer(flowPathLayer) || !rainLayerActive) {
-      if (!depthAt) {
-        populateFlowPathLayer(
-          flowPathLayer,
-          visibleFlowDirection,
-          visibleFlowAccumulation,
-          flowPathOptions
-        );
-      } else {
-        const weights = new Float64Array(flowDirection.length);
-        let wetSum = 0;
-        let wetCount = 0;
+    if (!rainLayerActive) {
+      // Uniform restore for every grid layer, whether or not it is on show:
+      // switching a restored layer on later must not reveal stale rain data.
+      populateFlowPathLayer(
+        flowPathLayer,
+        visibleFlowDirection,
+        visibleFlowAccumulation,
+        flowPathOptions
+      );
+      populateFlowAccumulationLayer(flowAccumulationLayer, visibleFlowAccumulation);
 
-        for (let position = 0; position < flowDirection.length; position += 1) {
-          const [lat, lng] = flowDirection[position].center;
-          const depth = depthAt(lat, lng);
-          if (depth > 0) {
-            weights[position] = depth;
-            wetSum += depth;
-            wetCount += 1;
-          }
-        }
-
-        if (wetCount === 0) {
-          flowPathLayer.clearLayers();
-        } else {
-          // Normalise so the average wet cell contributes 1: thresholds and
-          // colour classes then stay on a comparable scale to the uniform view.
-          const meanDepthMm = wetSum / wetCount;
-          for (let position = 0; position < weights.length; position += 1) {
-            weights[position] /= meanDepthMm;
-          }
-
-          const weighted = calculateFlowAccumulation(flowDirection, weights);
-          populateFlowPathLayer(
-            flowPathLayer,
-            visibleFlowDirection,
-            weighted.filter(isInsideAnalysis),
-            {
-              ...flowPathOptions,
-              minUpstream: Math.max(3, wetCount * config.flowRainFraction),
-              rainMeanDepthMm: meanDepthMm
-            }
-          );
-        }
+      if (roadFlow.refresh) {
+        roadFlow.refresh(null);
+        restorePipeStyles();
       }
+      return;
     }
 
     // Street flow in rain mode is driven tick-by-tick by the dynamic water
-    // model, not by this steady-state refresh; only the uniform restore runs
-    // through here. The water itself is deliberately left standing: switching
-    // the rainfall layer off is a display change, not a reason to throw away
-    // a flood that is still simulated.
-    if (!rainLayerActive && roadFlow.refresh) {
-      roadFlow.refresh(null);
-      restorePipeStyles();
+    // model, not by this steady-state pass. The grid layers re-weight the
+    // terrain accumulation by the storm's surface water, in mm, against an
+    // ABSOLUTE threshold: a share of the total would divide out as everything
+    // drains uniformly, and the network would never visibly dry.
+    if (!wantsPaths && !wantsAccumulation) {
+      return;
+    }
+
+    const weights = new Float64Array(flowDirection.length);
+    let wetCount = 0;
+
+    for (let position = 0; position < flowDirection.length; position += 1) {
+      const [lat, lng] = flowDirection[position].center;
+      const depth = rainfall.depthAt(lat, lng);
+      if (depth > 0) {
+        weights[position] = depth;
+        wetCount += 1;
+      }
+    }
+
+    if (wetCount === 0) {
+      if (wantsPaths) {
+        flowPathLayer.clearLayers();
+      }
+      if (wantsAccumulation) {
+        flowAccumulationLayer.clearLayers();
+      }
+      return;
+    }
+
+    const weighted = calculateFlowAccumulation(flowDirection, weights);
+    const visibleWeighted = weighted.filter(isInsideAnalysis);
+    // The threshold is water volume; accumulation carries mm summed over
+    // cells, so convert: mm x m2 / 1000 = m3.
+    const minUpstream = (config.flowRainMinM3 * 1000) / cellAreaM2;
+
+    if (wantsPaths) {
+      populateFlowPathLayer(flowPathLayer, visibleFlowDirection, visibleWeighted, {
+        ...flowPathOptions,
+        minUpstream,
+        rainMode: true
+      });
+    }
+
+    if (wantsAccumulation) {
+      populateFlowAccumulationLayer(flowAccumulationLayer, visibleWeighted, {
+        rainMode: true,
+        cellAreaM2,
+        minValue: minUpstream
+      });
     }
   }
 
@@ -387,7 +403,10 @@ export async function initializeMap() {
       rainLayerActive = true;
       applyFlowWeighting();
       roadFlow.dynamic?.render();
-    } else if (rainLayerActive && event.layer === flowPathLayer) {
+    } else if (
+      rainLayerActive &&
+      (event.layer === flowPathLayer || event.layer === flowAccumulationLayer)
+    ) {
       // Switched on while rain mode is active: rebuild rather than show stale.
       applyFlowWeighting();
     } else if (rainLayerActive && event.layer === roadFlow.layer) {

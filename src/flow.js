@@ -90,28 +90,64 @@ function thinningStep(total, targetCount) {
 }
 
 export function createFlowAccumulationLayer(flowAccumulation) {
-  const network = selectDrainageNetwork(flowAccumulation, config.flowNetworkPercentile);
+  const group = L.layerGroup();
+  populateFlowAccumulationLayer(group, flowAccumulation);
+  return group;
+}
+
+// Rebuilds the markers inside an existing group, so the layer-control
+// checkbox keeps pointing at the same layer while its content switches
+// between uniform terrain accumulation and rainfall-weighted accumulation -
+// the same arrangement the flow-path layer uses.
+export function populateFlowAccumulationLayer(group, flowAccumulation, options = {}) {
+  const { rainMode = false, cellAreaM2 = 0, minValue = 0 } = options;
+
+  group.clearLayers();
+
+  // Uniform mode keeps the percentile cut; rain mode uses the absolute
+  // threshold shared with the flow paths, so the network visibly thins as
+  // the storm's water drains away.
+  const network = rainMode
+    ? selectAboveThreshold(flowAccumulation, minValue)
+    : selectDrainageNetwork(flowAccumulation, config.flowNetworkPercentile);
 
   if (network.length === 0) {
-    return L.layerGroup([]);
+    return group;
   }
 
   const maxAccumulation = network[0].accumulationIndex;
   const minAccumulation = network[network.length - 1].accumulationIndex;
 
-  const features = network.map((item) =>
-    L.circleMarker(item.center, {
-      // Radius tracks how much upstream area drains through the cell. It used to
-      // track the array index, which made later cells absurdly large.
-      radius: scaleRadius(item.accumulationIndex, minAccumulation, maxAccumulation),
-      color: '#134e4a',
-      weight: 1,
-      fillColor: '#14b8a6',
-      fillOpacity: 0.35
-    }).bindTooltip(`Upstream cells: ${item.accumulationIndex.toLocaleString()}`)
-  );
+  for (const item of network) {
+    group.addLayer(
+      L.circleMarker(item.center, {
+        // Radius tracks how much upstream area drains through the cell. It
+        // used to track the array index, which made later cells absurdly big.
+        radius: scaleRadius(item.accumulationIndex, minAccumulation, maxAccumulation),
+        color: rainMode ? '#1e3a8a' : '#134e4a',
+        weight: 1,
+        fillColor: rainMode ? '#3b82f6' : '#14b8a6',
+        fillOpacity: 0.35
+      }).bindTooltip(
+        rainMode && cellAreaM2 > 0
+          ? `Storm water: ~${Math.round(
+              (item.accumulationIndex * cellAreaM2) / 1000
+            ).toLocaleString()} m\u00b3 through here`
+          : `Upstream cells: ${Math.round(item.accumulationIndex).toLocaleString()}`
+      )
+    );
+  }
 
-  return L.layerGroup(features);
+  return group;
+}
+
+// Every cell carrying at least the threshold, largest first, capped the same
+// way the percentile cut is.
+function selectAboveThreshold(flowAccumulation, minValue) {
+  return flowAccumulation
+    .filter((item) => Number.isFinite(item.accumulationIndex) && item.accumulationIndex >= minValue)
+    .sort((a, b) => b.accumulationIndex - a.accumulationIndex)
+    .slice(0, MAX_NETWORK_MARKERS);
 }
 
 // Keep an evenly spread subset rather than the first N, so arrows still cover
