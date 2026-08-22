@@ -365,25 +365,39 @@ function buildGridForecastLayer(grid, provinceOutlook, boundary) {
     ticks: document.querySelector('#forecast-ticks')
   };
 
-  // The province chance-of-rain, shown over open ground south-east of the
-  // built-up strip so it does not sit on top of Pattaya.
+  // The province chance-of-rain, anchored at the centre of the province's own
+  // area. Placing it at a fraction of the bounding box put it below the
+  // southern border entirely, out over Rayong.
   let percentChip = null;
+  let percentHtml = '';
   if (provinceOutlook && boundary) {
-    const outline = L.geoJSON(boundary).getBounds();
-    const south = outline.getSouth();
-    const west = outline.getWest();
-    percentChip = L.marker(
-      [
-        south + (outline.getNorth() - south) * 0.33,
-        west + (outline.getEast() - west) * 0.45
-      ],
-      {
-        interactive: false,
-        keyboard: false,
-        icon: L.divIcon({ className: 'wx-chip-anchor', html: '', iconSize: null })
-      }
-    );
+    percentChip = L.marker(polygonCentroid(boundary), {
+      interactive: false,
+      keyboard: false,
+      icon: L.divIcon({ className: 'wx-chip-anchor', html: '', iconSize: null })
+    });
     group.addLayer(percentChip);
+  }
+
+  /**
+   * Show the chip only once the province fills enough of the view.
+   *
+   * Zoomed far out the label keeps its pixel size while the province shrinks
+   * under it, so it ends up a caption floating over half of Thailand.
+   */
+  function updateChipVisibility(zoom) {
+    if (!percentChip) {
+      return;
+    }
+
+    const visible = zoom >= config.forecastChipMinZoom;
+    percentChip.setIcon(
+      L.divIcon({
+        className: 'wx-chip-anchor',
+        html: visible ? percentHtml : '',
+        iconSize: null
+      })
+    );
   }
 
   /** Match a forecast day to TMD's province entry for the same date. */
@@ -414,16 +428,11 @@ function buildGridForecastLayer(grid, provinceOutlook, boundary) {
 
     const outlook = outlookFor(day.date);
     if (percentChip) {
-      percentChip.setIcon(
-        L.divIcon({
-          className: 'wx-chip-anchor',
-          html: outlook
-            ? `<span class="wx-chip" style="border-color:${forecastStyleFor(outlook.rainChance).color}">` +
-              `TMD ${day.weekday}: <strong>${outlook.rainChance}%</strong> chance of rain</span>`
-            : '',
-          iconSize: null
-        })
-      );
+      percentHtml = outlook
+        ? `<span class="wx-chip" style="border-color:${forecastStyleFor(outlook.rainChance).color}">` +
+          `<strong>${outlook.rainChance}%</strong> chance of rain</span>`
+        : '';
+      updateChipVisibility(mapZoom());
     }
 
     // The day's total at the wettest point. Summing the area-wide peak hour
@@ -499,11 +508,20 @@ function buildGridForecastLayer(grid, provinceOutlook, boundary) {
 
   // The card is always on show - the forecast is worth reading whether or not
   // it is drawn on the map - so only the hover readout follows the toggle.
+  let attachedMap = null;
+  const mapZoom = () => (attachedMap ? attachedMap.getZoom() : config.forecastChipMinZoom);
+  const onZoom = () => updateChipVisibility(mapZoom());
+
   group.on('add', (event) => {
-    event.target._map.on('mousemove', onMove);
+    attachedMap = event.target._map;
+    attachedMap.on('mousemove', onMove);
+    attachedMap.on('zoomend', onZoom);
+    updateChipVisibility(mapZoom());
   });
   group.on('remove', (event) => {
     event.target._map?.off('mousemove', onMove);
+    event.target._map?.off('zoomend', onZoom);
+    attachedMap = null;
     readout.close();
   });
 
@@ -518,6 +536,53 @@ function buildGridForecastLayer(grid, provinceOutlook, boundary) {
     forecast: null,
     stepCount
   };
+}
+
+/**
+ * Centre of area of the largest ring in a GeoJSON polygon.
+ *
+ * Chon Buri is an L-shape with offshore islands, so its bounding-box centre
+ * lands outside the province. The area centroid of the mainland ring sits
+ * where a label belongs.
+ */
+function polygonCentroid(geojson) {
+  const features = geojson.features || [geojson];
+  let best = null;
+  let bestArea = 0;
+
+  for (const feature of features) {
+    const geometry = feature.geometry || feature;
+    const polygons =
+      geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates || [];
+
+    for (const polygon of polygons) {
+      const ring = polygon[0];
+      if (!ring || ring.length < 4) {
+        continue;
+      }
+
+      // Shoelace: twice the signed area, and the area-weighted centre.
+      let twiceArea = 0;
+      let x = 0;
+      let y = 0;
+      for (let i = 0; i < ring.length - 1; i += 1) {
+        const [x1, y1] = ring[i];
+        const [x2, y2] = ring[i + 1];
+        const cross = x1 * y2 - x2 * y1;
+        twiceArea += cross;
+        x += (x1 + x2) * cross;
+        y += (y1 + y2) * cross;
+      }
+
+      const area = Math.abs(twiceArea / 2);
+      if (area > bestArea && twiceArea !== 0) {
+        bestArea = area;
+        best = [y / (3 * twiceArea), x / (3 * twiceArea)];
+      }
+    }
+  }
+
+  return best || [0, 0];
 }
 
 /** Split a flat hourly timeline into days, each with its own step indices. */

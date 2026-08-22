@@ -155,6 +155,10 @@ export const config = {
   // TMD's grid is far denser, and its docs warn about wide boxes, so its
   // area grows more modestly than the keyless fallback's.
   tmdAreaScale: readNumber(env.VITE_TMD_AREA_SCALE, 1.5, { min: 1, max: 5 }),
+  // Below this zoom the chance-of-rain chip is hidden: it keeps its pixel
+  // size while the province shrinks under it, and ends up captioning half
+  // of Thailand.
+  forecastChipMinZoom: readNumber(env.VITE_FORECAST_CHIP_MIN_ZOOM, 9, { min: 0, max: 22 }),
   forecastDays: readNumber(env.VITE_FORECAST_DAYS, 7, { min: 1, max: 16 }),
   forecastGridOpacity: readNumber(env.VITE_FORECAST_OPACITY, 0.5, { min: 0.05, max: 1 }),
   // Ceiling on drawn forecast cells; TMD at 3 km over the province exceeds it.
