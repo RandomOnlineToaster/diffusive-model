@@ -155,6 +155,9 @@ export const config = {
   // TMD's grid is far denser, and its docs warn about wide boxes, so its
   // area grows more modestly than the keyless fallback's.
   tmdAreaScale: readNumber(env.VITE_TMD_AREA_SCALE, 1.5, { min: 1, max: 5 }),
+  // Hours of TMD grid to request. Its area endpoint takes about a minute to
+  // answer whatever the span, and 24 h of the study area is already ~2 MB.
+  tmdForecastHours: readNumber(env.VITE_TMD_FORECAST_HOURS, 24, { min: 1, max: 72 }),
   // Below this zoom the chance-of-rain chip is hidden: it keeps its pixel
   // size while the province shrinks under it, and ends up captioning half
   // of Thailand.
@@ -191,17 +194,26 @@ export const config = {
   // Raising it thins the network to the major stems.
   flowPathMinUpstream: readNumber(env.VITE_FLOW_PATH_MIN_UPSTREAM, 150, { min: 1, max: 100000 }),
   flowPathSteps: readNumber(env.VITE_FLOW_PATH_STEPS, 150, { min: 2, max: 2000 }),
-  // Marching dashes show flow direction, at the cost of SVG rendering.
+  // Draw Flow Paths and Street Flow as moving colour-classed trails riding
+  // the traced lines, the way Flow Direction is drawn. Off, or with reduced
+  // motion requested, solid colour-classed lines are drawn instead.
   flowPathAnimate: readFlag(env.VITE_FLOW_PATH_ANIMATE, true),
-  // Below this zoom the marching dashes are drawn solid. Zoomed out, a whole
-  // chain can be shorter than one dash period, so the animation reads as a
-  // blinking dot rather than as flow direction. 12 is the 3 km scale bar;
-  // the blinking sets in at 5 km (zoom 11) and wider.
+  // Classic (Shift + tick) rendering: below this zoom the marching dashes are
+  // drawn solid. Zoomed out, a whole chain can be shorter than one dash
+  // period, so the animation reads as a blinking dot rather than as flow
+  // direction. 12 is the 3 km scale bar; the blinking sets in at 5 km.
   flowDashMinZoom: readNumber(env.VITE_FLOW_DASH_MIN_ZOOM, 12, { min: 0, max: 22 }),
 
   // Flow arrows are markers, so the analysis grid gets thinned down to roughly
   // this many before drawing.
   flowArrowCount: readNumber(env.VITE_FLOW_ARROW_COUNT, 350, { min: 0, max: 5000 }),
+
+  // Draw Flow Direction as drifting particles with fading trails, the way
+  // wind maps draw wind. Off, or with reduced motion requested, the static
+  // arrows are drawn instead.
+  flowParticles: readFlag(env.VITE_FLOW_PARTICLES, true),
+  // Particles on screen at once on a large viewport; small ones get fewer.
+  flowParticleCount: readNumber(env.VITE_FLOW_PARTICLE_COUNT, 2500, { min: 100, max: 20000 }),
 
   // Clip the map layers to the Chon Buri polygon. The analysis grid always
   // stays full-extent: catchments cross provincial borders, so masking it

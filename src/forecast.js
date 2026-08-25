@@ -108,18 +108,41 @@ async function loadTmdGrid(rawBounds) {
 
   const bounds = expandBounds(rawBounds, config.tmdAreaScale);
   const domain = config.tmdForecastDomain;
+
+  // starttime is mandatory - without it the endpoint answers 422 - and the
+  // range is set by endtime, not a duration. Times are Bangkok local, on the
+  // hour, which is the grid TMD publishes on.
+  const start = new Date();
+  start.setMinutes(0, 0, 0);
+  const end = new Date(start.getTime() + config.tmdForecastHours * 3600 * 1000);
+  const stamp = (date) =>
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-` +
+    `${String(date.getDate()).padStart(2, '0')}T${String(date.getHours()).padStart(2, '0')}:00:00`;
+
   const url =
     `${config.tmdProxyPath}/nwpapi/v1/forecast/area/box` +
     `?domain=${domain}` +
     `&bottom-left=${bounds.south.toFixed(2)},${bounds.west.toFixed(2)}` +
     `&top-right=${bounds.north.toFixed(2)},${bounds.east.toFixed(2)}` +
-    '&fields=rain';
+    `&fields=rain&starttime=${stamp(start)}&endtime=${stamp(end)}`;
 
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${config.tmdToken}`, accept: 'application/json' }
   });
 
   if (!response.ok) {
+    if (response.status === 429) {
+      const retry = Number(response.headers.get('retry-after') || 0);
+      if (retry > 0) {
+        // Remembered so reloading the page does not spend another request
+        // against a quota that is already exhausted.
+        setBackoff(retry);
+      }
+      throw new Error(
+        `TMD rate limit reached; retry in about ${Math.ceil(retry / 60) || '?'} minutes`
+      );
+    }
+
     throw new Error(`TMD grid responded ${response.status}`);
   }
 
@@ -238,22 +261,119 @@ function gridSpacing(points) {
 }
 
 /**
- * Load the best grid available: TMD when a token is configured, otherwise the
- * keyless fallback. A TMD failure falls through rather than losing the layer.
+ * The grid to show immediately.
+ *
+ * Always the keyless provider: TMD's area endpoint takes about a minute to
+ * answer even for one hour of a small box, so awaiting it would hold up the
+ * whole map. It arrives later through loadTmdForecastGrid instead.
  */
-export async function loadForecastGrid(bounds) {
-  if (config.tmdToken) {
-    try {
-      const grid = await loadTmdGrid(bounds);
-      if (grid) {
-        return grid;
-      }
-    } catch (error) {
-      console.warn('TMD grid forecast unavailable, falling back:', error.message);
+export function loadFastForecastGrid(bounds) {
+  return loadOpenMeteoGrid(bounds);
+}
+
+// TMD is rate limited - a 429 comes back with retry-after measured in tens of
+// minutes - and one area request costs about a minute and a couple of
+// megabytes. Reloading the page must therefore not re-ask for a grid that has
+// not changed: the product is hourly, so a cached grid stands until the hour
+// turns.
+const TMD_CACHE_KEY = 'water-map.tmd-grid.v1';
+const TMD_BACKOFF_KEY = 'water-map.tmd-backoff.v1';
+
+/** When rate limited, TMD tells us how long to wait; honour it across reloads. */
+function backoffRemainingMs() {
+  try {
+    const until = Number(window.localStorage.getItem(TMD_BACKOFF_KEY) || 0);
+    return until > Date.now() ? until - Date.now() : 0;
+  } catch (error) {
+    return 0;
+  }
+}
+
+function setBackoff(seconds) {
+  try {
+    window.localStorage.setItem(TMD_BACKOFF_KEY, String(Date.now() + seconds * 1000));
+  } catch (error) {
+    // Storage unavailable; the only cost is asking again next reload.
+  }
+}
+
+function tmdCacheKey(bounds) {
+  const hour = new Date().toISOString().slice(0, 13);
+  return [
+    config.tmdForecastDomain,
+    config.tmdForecastHours,
+    bounds.south.toFixed(2),
+    bounds.west.toFixed(2),
+    bounds.north.toFixed(2),
+    bounds.east.toFixed(2),
+    hour
+  ].join('|');
+}
+
+function readTmdCache(key) {
+  try {
+    const raw = window.localStorage.getItem(TMD_CACHE_KEY);
+    if (!raw) {
+      return null;
     }
+
+    const cached = JSON.parse(raw);
+    return cached && cached.key === key ? cached.grid : null;
+  } catch (error) {
+    // A private window, cleared site data or a browser that refuses storage.
+    return null;
+  }
+}
+
+function writeTmdCache(key, grid) {
+  try {
+    // Rain to one decimal and coordinates to four keeps a province-sized grid
+    // comfortably inside the storage quota.
+    const slim = {
+      ...grid,
+      points: grid.points.map((point) => ({
+        lat: Number(point.lat.toFixed(4)),
+        lng: Number(point.lng.toFixed(4)),
+        rain: point.rain.map((value) => Number(Number(value).toFixed(1)))
+      }))
+    };
+
+    window.localStorage.setItem(TMD_CACHE_KEY, JSON.stringify({ key, grid: slim }));
+  } catch (error) {
+    console.warn('TMD grid not cached:', error.message);
+  }
+}
+
+/**
+ * TMD's own 3 km grid, or null when no token is configured.
+ *
+ * Slow enough that callers should treat it as an upgrade that lands when it
+ * lands, never as something to wait on. Served from cache within the hour.
+ */
+export async function loadTmdForecastGrid(rawBounds) {
+  if (!config.tmdToken) {
+    return null;
   }
 
-  return loadOpenMeteoGrid(bounds);
+  const bounds = expandBounds(rawBounds, config.tmdAreaScale);
+  const key = tmdCacheKey(bounds);
+
+  const cached = readTmdCache(key);
+  if (cached) {
+    return cached;
+  }
+
+  const waiting = backoffRemainingMs();
+  if (waiting > 0) {
+    throw new Error(`TMD rate limit reached; retry in about ${Math.ceil(waiting / 60000)} minutes`);
+  }
+
+  const grid = await loadTmdGrid(rawBounds);
+  if (grid?.points?.length) {
+    writeTmdCache(key, grid);
+  }
+
+  return grid;
 }
 
 /**
@@ -291,6 +411,41 @@ function toLattice(points) {
  * bilinear filter turns the coarse lattice into the continuous wash a rain
  * forecast is normally shown as, instead of a chequerboard of hard squares.
  */
+// An image overlay whose element is a <canvas> we draw into, rather than an
+// <img> we have to encode and let the browser decode.
+//
+// Leaflet's ImageOverlay already does everything else that matters here -
+// projecting the bounds, sizing the element, animating it through a zoom - and
+// all of that works on any element it can position. Only the source of the
+// pixels changes. Encoding was measured at 4.6 ms of every scrub step, with
+// the decode landing on top of it, which is what made dragging the slider
+// drop about a third of its frames.
+const CanvasOverlay = L.ImageOverlay.extend({
+  initialize(canvas, bounds, options) {
+    this._canvasElement = canvas;
+    L.ImageOverlay.prototype.initialize.call(this, '', bounds, options);
+  },
+
+  _initImage() {
+    const element = this._canvasElement;
+    this._image = element;
+    element.classList.add('leaflet-image-layer');
+    if (this._zoomAnimated) {
+      element.classList.add('leaflet-zoom-animated');
+    }
+    if (this.options.className) {
+      element.classList.add(this.options.className);
+    }
+    element.onselectstart = L.Util.falseFn;
+    element.onmousemove = L.Util.falseFn;
+  },
+
+  // The pixels come from showStep, not from a URL.
+  setUrl() {
+    return this;
+  }
+});
+
 export function createForecastGridLayer(grid) {
   const lattice = toLattice(grid.points);
   const bounds = L.latLngBounds(
@@ -315,22 +470,28 @@ export function createForecastGridLayer(grid) {
   const displayCtx = display.getContext('2d');
   displayCtx.imageSmoothingEnabled = true;
   displayCtx.imageSmoothingQuality = 'high';
+  // Softens what the bilinear upscale leaves behind, measured in display-canvas
+  // pixels so it stays proportional to a cell however coarse the lattice is.
+  const BLUR_PX = Math.max(2, scale / 4);
 
-  const overlay = L.imageOverlay('', bounds, {
+  const overlay = new CanvasOverlay(display, bounds, {
     opacity: config.forecastGridOpacity,
     interactive: false,
     className: 'wx-heat'
   });
-  const group = L.layerGroup([overlay]);
 
   // Values for the step on screen, so a hover can be answered without
   // re-reading the whole series.
   let currentValues = new Float32Array(lattice.rows * lattice.columns);
 
+  const image = sourceCtx.createImageData(lattice.columns, lattice.rows);
+
   function showStep(index) {
-    const image = sourceCtx.createImageData(lattice.columns, lattice.rows);
     const pixels = image.data;
     let peak = 0;
+
+    // Reused between steps, so start from blank rather than last step.
+    pixels.fill(0);
 
     for (let row = 0; row < lattice.rows; row += 1) {
       for (let column = 0; column < lattice.columns; column += 1) {
@@ -360,8 +521,13 @@ export function createForecastGridLayer(grid) {
 
     sourceCtx.putImageData(image, 0, 0);
     displayCtx.clearRect(0, 0, display.width, display.height);
+    // Blur here rather than through a CSS filter on the overlay. As CSS it was
+    // re-rasterised on every repaint at the element's rendered size - which,
+    // once the forecast covered 3x3 study areas, was over 1100x1300 px and cost
+    // roughly half the frame rate. Baked into the canvas it runs once per step.
+    displayCtx.filter = `blur(${BLUR_PX}px)`;
     displayCtx.drawImage(source, 0, 0, display.width, display.height);
-    overlay.setUrl(display.toDataURL());
+    displayCtx.filter = 'none';
 
     const stamp = grid.times[index];
     return { time: stamp ? stamp.replace('T', ' ') : `step ${index}`, peak };
@@ -378,7 +544,7 @@ export function createForecastGridLayer(grid) {
     return currentValues[row * lattice.columns + column];
   }
 
-  return { group, showStep, valueAt, stepCount: grid.times.length };
+  return { overlay, showStep, valueAt, stepCount: grid.times.length };
 }
 
 /**

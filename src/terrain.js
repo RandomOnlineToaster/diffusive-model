@@ -536,6 +536,9 @@ function calculateGridFlowDirection(grid) {
       column: cell.column,
       center: cell.center,
       direction: bestDirection,
+      // Height lost to the downstream cell, in metres; the particle layer
+      // paces by it.
+      drop: bestDrop,
       downstreamIndex,
       downstreamId: downstreamIndex < 0
         ? null

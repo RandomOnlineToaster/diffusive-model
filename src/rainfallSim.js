@@ -19,7 +19,15 @@ import { config } from './config.js';
 // second, which is what made the whole map stutter.
 const TICK_MS = 250;
 
-export function createRainfallSimulator({ map, bounds, onWaterAdded, onTick, onReset, getWaterOnMapM3 }) {
+export function createRainfallSimulator({
+  map,
+  bounds,
+  onWaterAdded,
+  onTick,
+  onReset,
+  getWaterOnMapM3,
+  streetCoverage
+}) {
   const grid = createRainfallGrid({
     bounds,
     columns: config.rainGridSize,
@@ -54,6 +62,7 @@ export function createRainfallSimulator({ map, bounds, onWaterAdded, onTick, onR
     volume: document.querySelector('#sim-volume'),
     water: document.querySelector('#sim-water'),
     legend: document.querySelector('#sim-legend'),
+    coverageNote: document.querySelector('#sim-coverage-note'),
     probe: document.querySelector('#sim-probe')
   };
 
@@ -378,6 +387,7 @@ export function createRainfallSimulator({ map, bounds, onWaterAdded, onTick, onR
     // Standing water on the streets right now, which falls as it drains -
     // unlike the cumulative rain volume beside it.
     dom.water.textContent = `${Math.round(getWaterOnMapM3?.() ?? 0).toLocaleString()} m\u00b3`;
+    updateCoverageNote();
     updateProbe();
 
     onWaterAdded?.({
@@ -385,6 +395,32 @@ export function createRainfallSimulator({ map, bounds, onWaterAdded, onTick, onR
       peakAccumulationMm: totals.peakAccumulationMm,
       wetCells: totals.wetCells
     });
+  }
+
+  /**
+   * Street water is only tracked where streets are mapped, and the graph
+   * covers the Pattaya-Sattahip strip rather than the whole province. Rain
+   * outside it is real but lands on nothing, so "Water on map" reads zero
+   * with no visible reason - which is worth saying rather than leaving to be
+   * discovered.
+   *
+   * Judged on the outcome rather than on where the storm sits: a cell whose
+   * edge merely grazes the network drops almost nothing on it, so geometry
+   * alone called that "covered" while the readout still sat at zero.
+   */
+  function updateCoverageNote() {
+    const rained = grid.totals().totalVolumeM3;
+    const onStreets = getWaterOnMapM3?.() ?? 0;
+
+    // Enough rain to expect a reading, and effectively none arriving.
+    const missing = streetCoverage && rained > 10000 && onStreets < rained * 0.02;
+
+    dom.coverageNote.hidden = !missing;
+    if (missing) {
+      dom.coverageNote.textContent =
+        'Rain is falling outside the mapped street network (Pattaya to Sattahip), ' +
+        'so no street water is tracked where this storm is.';
+    }
   }
 
   function tick() {

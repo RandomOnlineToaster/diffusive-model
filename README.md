@@ -11,7 +11,9 @@ storms and routes the resulting water across terrain and streets.
   **water-surface** slope using Manning's law, so a flooded downstream street
   backs water up onto its neighbours instead of swallowing it forever.
 - **Flow paths / accumulation / direction** — D8 routing on the DEM analysis
-  grid, for the catchment-scale picture.
+  grid, for the catchment-scale picture. Flow Direction, Flow Paths and
+  Street Flow are all drawn as moving particle trails, the way wind maps
+  draw wind - coloured green to red by how much water they carry.
 - **Weather** — live satellite cloud cover from
   [JAXA GSMaP](https://sharaku.eorc.jaxa.jp/GSMaP/), a gridded rainfall
   forecast with an hourly slider, and measured rainfall from the

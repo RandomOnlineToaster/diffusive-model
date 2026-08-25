@@ -1,6 +1,12 @@
 import L from 'leaflet';
 import { config } from './config.js';
-import { ACCUMULATION_COLORS, accumulationClassifier } from './flow.js';
+import {
+  ACCUMULATION_COLORS,
+  accumulationClassifier,
+  addLinesByClass,
+  flowLineRenderer
+} from './flow.js';
+import { createChainParticleLayer } from './flowParticles.js';
 import { createMinHeap } from './terrain.js';
 
 // High-detail flow paths routed along the street network.
@@ -39,41 +45,61 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     lng
   );
 
-  // Marching dashes need a CSS animation on the stroke, which only the SVG
-  // renderer provides. But an SVG path is a DOM node each: recreating many
-  // thousands of them every refresh is what froze the map under a big storm,
-  // so large rebuilds go to a canvas renderer (one element total) and only
-  // small ones keep the animated SVG dashes.
-  const animated = config.flowPathAnimate;
-  const MAX_ANIMATED_LINES = 6000;
-  const svgRenderer = animated ? L.svg({ padding: 0.3 }) : null;
-  // tolerance widens the hover hit area (px) - the strokes are thin and the
-  // dashes thinner, so exact hovers were needed to read a tooltip.
-  const canvasRenderer = L.canvas({ padding: 0.3, tolerance: 8 });
+  // Marching dashes were retired here. Re-dashing an animated stroke every
+  // frame is raster work in proportion to the geometry on screen - measured
+  // on this map it holds 60 fps to roughly 700 drawn vertices - and this
+  // network is thousands of chains at every useful zoom (~3,700 dry, up to
+  // ~18,000 under a wide storm). So the chains draw solid on one canvas, and
+  // direction comes from stream particles riding the chains downstream: the
+  // same trail recipe as the Flow Direction layer, whose cost is set by the
+  // particle count rather than by the size of the network.
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+  const streams =
+    config.flowPathAnimate && !reducedMotion
+      ? createChainParticleLayer({ isDark: (name) => name === 'Satellite' })
+      : null;
   const group = L.layerGroup();
+  if (streams) {
+    group.addLayer(streams);
+  }
   let lineCount = 0;
 
+  // Drop the drawn chains but keep the stream layer: removing it too would
+  // tear down and rebuild its canvas on every storm refresh.
+  function clearChains() {
+    const stale = [];
+    group.eachLayer((layer) => {
+      if (layer !== streams) {
+        stale.push(layer);
+      }
+    });
+    for (const layer of stale) {
+      group.removeLayer(layer);
+    }
+  }
+
   function rebuild(values, minValue, tooltipFor, classOfOverride = null, aux = null) {
-    group.clearLayers();
+    clearChains();
     const classOf = classOfOverride || accumulationClassifier(minValue, maxOf(values));
     const lines = chainByClass(nodeCount, downstream, values, classOf, minValue, lat, lng, aux);
     lineCount = lines.length;
 
-    const animateNow = animated && lines.length <= MAX_ANIMATED_LINES;
-    const renderer = animateNow ? svgRenderer : canvasRenderer;
+    addLinesByClass(group, lines, {
+      // The one shared flow-line canvas: a second canvas stacked on top
+      // would swallow the other flow layer's hovers (see flow.js).
+      renderer: flowLineRenderer(),
+      className: 'flow-path',
+      weightFor: (colorClass) => 1.2 + colorClass * 0.6,
+      describe: (line) => tooltipFor(line.value, line.aux),
+      // With the particle layer running it IS the layer - trails, or the
+      // classic dashes - as it is for Flow Direction; the lines stay only as
+      // hover targets. Without it (animation off, reduced motion) the solid
+      // colour-classed lines are drawn instead.
+      drawn: !streams
+    });
 
-    for (const line of lines) {
-      group.addLayer(
-        L.polyline(line.points, {
-          renderer,
-          // Chains run upstream -> downstream, so the dashes march downhill.
-          className: animateNow ? 'flow-path flow-path--animated' : 'flow-path',
-          color: ACCUMULATION_COLORS[line.colorClass],
-          weight: 1.2 + line.colorClass * 0.6,
-          opacity: 0.9
-        }).bindTooltip(tooltipFor(line.value, line.aux), { sticky: true })
-      );
-    }
+    // Chains run upstream -> downstream, so the streams flow downhill.
+    streams?.setLines(lines);
   }
 
   const uniformTooltip = (value) =>
@@ -543,7 +569,8 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
           // In rain mode the layer shows this storm's water and nothing else,
           // so with none on the ground it stays empty - waiting for a storm,
           // not falling back to the terrain baseline.
-          group.clearLayers();
+          clearChains();
+          streams?.setLines([]);
           lineCount = 0;
           return;
         }
@@ -581,6 +608,12 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     // Raw graph coordinates, so the pipe model can map inlets onto junctions.
     graph: { nodeCount, lat, lng },
 
+    /** Shift + tick: classic dashed rendering instead of stream particles. */
+    setClassic(flag) {
+      // Shift + tick: the classic marching dashes, drawn by the same layer.
+      streams?.setMode(flag ? 'dash' : 'trail');
+    },
+
     /**
      * Switch between uniform terrain flow and rainfall-driven flow.
      *
@@ -607,7 +640,8 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
       }
 
       if (wetCount === 0) {
-        group.clearLayers();
+        clearChains();
+        streams?.setLines([]);
         lineCount = 0;
         return;
       }

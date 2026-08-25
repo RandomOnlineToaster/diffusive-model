@@ -1,5 +1,6 @@
 import L from 'leaflet';
 import { config } from './config.js';
+import { createChainParticleLayer } from './flowParticles.js';
 
 // Flow layers are derived from the analysis grid, which is far denser than the
 // map can draw one marker per cell. Both layers therefore reduce the data
@@ -251,6 +252,53 @@ export function createFlowPathLayer(flowDirection, flowAccumulation, options = {
 // Rebuilds the lines inside an existing group, so the layer-control checkbox
 // keeps pointing at the same layer while its content switches between uniform
 // terrain accumulation and rainfall-weighted accumulation.
+// ONE canvas renderer for every flow line on the map, created on first use
+// and kept for the session.
+//
+// One, for two reasons. Creating a renderer per populate call leaked one per
+// call - Leaflet adds a renderer to the map the first time a path uses it and
+// removing the paths later does not remove it, so an hour of rain stranded
+// hundreds of them, each still re-projecting itself on every pan and zoom.
+// And one per LAYER is not enough either: stacked canvas renderers swallow
+// each other's pointer events - the topmost canvas receives the DOM event and
+// hit-tests only its own paths - so whichever flow layer was added later left
+// the other's tooltips dead. On a single canvas every flow line shares one
+// hit test.
+let sharedFlowRenderer = null;
+
+export function flowLineRenderer() {
+  if (!sharedFlowRenderer) {
+    // tolerance widens the hover hit area (px): the strokes are thin, and on
+    // canvas an exact hover was needed to read a tooltip.
+    sharedFlowRenderer = L.canvas({ padding: 0.3, tolerance: 8 });
+  }
+
+  return sharedFlowRenderer;
+}
+
+// And one stream layer per group, likewise for its lifetime: the particles
+// that ride the drawn lines downstream. Same visual language as Street Flow -
+// solid colour for how much water, moving trails for which way.
+const groupStreams = new WeakMap();
+
+function streamsFor(group, animate) {
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+  if (!animate || reduced) {
+    return null;
+  }
+
+  let streams = groupStreams.get(group);
+  if (!streams) {
+    streams = createChainParticleLayer({ isDark: (name) => name === 'Satellite' });
+    groupStreams.set(group, streams);
+  }
+  if (!group.hasLayer(streams)) {
+    group.addLayer(streams);
+  }
+
+  return streams;
+}
+
 export function populateFlowPathLayer(group, flowDirection, flowAccumulation, options = {}) {
   const {
     minUpstream = config.flowPathMinUpstream,
@@ -259,10 +307,27 @@ export function populateFlowPathLayer(group, flowDirection, flowAccumulation, op
     cellAreaM2 = 0,
     // Set when the accumulation carries surface water in mm rather than cell
     // counts; tooltips then report real volumes.
-    rainMode = false
+    rainMode = false,
+    // Shift + tick: the original dashed-line rendering instead of particles.
+    classic = false
   } = options;
 
-  group.clearLayers();
+  // Drop the drawn lines but keep the stream layer between refreshes, the
+  // way the street layer does: removing it too would tear down and rebuild
+  // its canvas on every storm refresh.
+  const streams = streamsFor(group, animate);
+  // Shift + tick: the classic marching dashes, drawn by the same layer.
+  streams?.setMode(classic ? 'dash' : 'trail');
+  const stale = [];
+  group.eachLayer((layer) => {
+    if (layer !== streams) {
+      stale.push(layer);
+    }
+  });
+  for (const layer of stale) {
+    group.removeLayer(layer);
+  }
+  streams?.setLines([]);
 
   if (flowDirection.length === 0 || flowAccumulation.length === 0) {
     return group;
@@ -278,7 +343,7 @@ export function populateFlowPathLayer(group, flowDirection, flowAccumulation, op
   const channel = flowDirection.filter((item) => (accumulation.get(item.index) || 0) >= minUpstream);
 
   if (channel.length === 0) {
-    return L.layerGroup([]);
+    return group;
   }
 
   let peak = 0;
@@ -341,21 +406,146 @@ export function populateFlowPathLayer(group, flowDirection, flowAccumulation, op
     }
   }
 
-  const renderer = animate ? L.svg({ padding: 0.3 }) : L.canvas({ padding: 0.3 });
+  addLinesByClass(group, lines, {
+    renderer: flowLineRenderer(),
+    className: 'flow-path',
+    weightFor: (colorClass) => 1.1 + colorClass * 0.5,
+    describe: (line) => describeFlow(line.value, cellAreaM2, rainMode),
+    // With the particle layer running it IS the layer - trails, or the
+    // classic dashes - as it is for Flow Direction; the lines stay only as
+    // hover targets. Without it (animation off, reduced motion) the solid
+    // colour-classed lines are drawn instead.
+    drawn: !streams
+  });
+
+  // Lines run headwater -> downstream, so the streams flow downhill.
+  streams?.setLines(lines);
+
+  return group;
+}
+
+// Draw the traced lines as ONE polyline per colour class rather than one per
+// channel.
+//
+// Every line in a class already shares its colour and its weight, so a class
+// can be a single path holding many subpaths - the picture is identical. What
+// changes is the cost of animating it: `stroke-dashoffset` is not a
+// compositable property, so the browser recalculates style and repaints once
+// per animated ELEMENT on every frame. Measured on this map, 410 separate
+// paths spent 23% of the main thread on style recalculation alone and dropped
+// the page to 44 fps; the same geometry as five paths does not. It also makes
+// a rebuild far cheaper, which is what the street layer does every couple of
+// seconds while the rainfall simulator runs.
+//
+// The per-channel readout survives the merge by finding the nearest drawn
+// vertex to the pointer, instead of relying on one element per channel.
+export function addLinesByClass(
+  group,
+  lines,
+  { renderer, className, weightFor, describe, drawn = true }
+) {
+  const byClass = new Map();
 
   for (const line of lines) {
-    group.addLayer(
-      L.polyline(line.points, {
+    const bucket = byClass.get(line.colorClass);
+    if (bucket) {
+      bucket.push(line);
+    } else {
+      byClass.set(line.colorClass, [line]);
+    }
+  }
+
+  // Ascending, so the busiest channels are drawn last and stay on top - the
+  // stacking one-line-per-channel used to get from the traversal order.
+  const classes = [...byClass.keys()].sort((a, b) => a - b);
+
+  for (const colorClass of classes) {
+    const bucket = byClass.get(colorClass);
+    const polyline = L.polyline(
+      bucket.map((line) => line.points),
+      {
         renderer,
-        className: animate ? 'flow-path flow-path--animated' : 'flow-path',
-        color: ACCUMULATION_COLORS[line.colorClass],
-        weight: 1.1 + line.colorClass * 0.5,
+        className,
+        color: ACCUMULATION_COLORS[colorClass],
+        weight: weightFor(colorClass),
+        // When the stream particles carry the layer, the lines are not drawn
+        // at all: stroke:false skips rasterising them rather than painting
+        // them invisibly. They stay on the map as hover targets, so the
+        // per-channel tooltips keep working.
+        stroke: drawn,
         opacity: 0.9
-      }).bindTooltip(describeFlow(line.value, cellAreaM2, rainMode), { sticky: true })
+      }
     );
+
+    // Built on the first hover rather than here: while a storm runs, this
+    // layer is rebuilt far more often than anyone hovers it.
+    let findNearest = null;
+    let shownLine = null;
+    const retarget = (event) => {
+      if (!findNearest) {
+        findNearest = createNearestLineFinder(bucket);
+      }
+
+      // Rewrite the tooltip only when the nearest channel actually changes;
+      // mousemove fires continuously and the DOM write is the expensive part.
+      const line = findNearest(event.latlng.lat, event.latlng.lng);
+      if (line && line !== shownLine) {
+        shownLine = line;
+        polyline.setTooltipContent(describe(line));
+      }
+    };
+
+    polyline.bindTooltip(describe(bucket[0]), { sticky: true });
+    polyline.on('mouseover', retarget);
+    polyline.on('mousemove', retarget);
+    group.addLayer(polyline);
   }
 
   return group;
+}
+
+// Nearest line to a point, by vertex, over a flat copy of the geometry: a
+// typed-array scan beats walking the line objects, and the whole layer is only
+// a few tens of thousands of vertices.
+function createNearestLineFinder(lines) {
+  let total = 0;
+  for (const line of lines) {
+    total += line.points.length;
+  }
+
+  const lats = new Float64Array(total);
+  const lngs = new Float64Array(total);
+  const owner = new Int32Array(total);
+  let at = 0;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    for (const point of lines[index].points) {
+      lats[at] = point[0];
+      lngs[at] = point[1];
+      owner[at] = index;
+      at += 1;
+    }
+  }
+
+  return (lat, lng) => {
+    // Degrees of longitude shrink towards the poles; without this the search
+    // is biased east-west. Squared distance is enough to rank.
+    const cosLat = Math.cos((lat * Math.PI) / 180);
+    let best = -1;
+    let bestDistance = Infinity;
+
+    for (let i = 0; i < total; i += 1) {
+      const dy = lats[i] - lat;
+      const dx = (lngs[i] - lng) * cosLat;
+      const distance = dy * dy + dx * dx;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = owner[i];
+      }
+    }
+
+    return best < 0 ? null : lines[best];
+  };
 }
 
 function describeFlow(upstreamCells, cellAreaM2, rainMode) {

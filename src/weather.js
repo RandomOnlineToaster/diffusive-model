@@ -4,7 +4,8 @@ import {
   createForecastGridLayer,
   FORECAST_LEGEND,
   legendGradient,
-  loadForecastGrid
+  loadFastForecastGrid,
+  loadTmdForecastGrid
 } from './forecast.js';
 
 // Live weather layers, from two public sources.
@@ -130,169 +131,498 @@ function parseThaiDate(text) {
  * popup - not a rainfall field. The high-resolution grid forecast TMD also
  * publishes needs an OAuth token; see .env.local.
  */
-export async function createRainForecastLayer({ boundary, bounds, provinceName = 'Chonburi' } = {}) {
-  // A real grid beats one figure for the whole province, so try that first
-  // and keep the province outlook as the fallback.
-  if (bounds) {
-    try {
-      // The province outlook rides along for its chance-of-rain figure, which
-      // the grid does not carry; a failure there must not lose the grid.
-      const [grid, provinceOutlook] = await Promise.all([
-        loadForecastGrid(bounds),
-        loadProvinceForecast(provinceName).catch(() => null)
-      ]);
+/**
+ * Two rain-forecast layers that share one card.
+ *
+ *   Open-Meteo  - keyless, ~8 km, a week ahead. Awaited, so the first paint
+ *                 already has a forecast on it.
+ *   TMD         - the local model, ~3 km, a day ahead. Its area endpoint takes
+ *                 about a minute to answer and is rate limited, so it loads in
+ *                 the background and the layer fills in when it lands.
+ *
+ * They are separate toggles but never both drawn: switching one on turns the
+ * other off, and the card follows whichever is on, animating its timeline
+ * between the two runs' spans.
+ */
+export async function createRainForecastLayers({ boundary, bounds, provinceName = 'Chonburi' } = {}) {
+  const card = createForecastCard({ boundary });
 
-      if (grid?.points?.length && grid.times.length) {
-        return buildGridForecastLayer(grid, provinceOutlook, boundary);
-      }
-    } catch (error) {
-      console.warn('Gridded forecast unavailable, using province outlook:', error.message);
-    }
-  }
+  // The province chance-of-rain rides along for the map chip; it is not a
+  // grid and must not block either layer.
+  loadProvinceForecast(provinceName)
+    .then((outlook) => card.setProvinceOutlook(outlook))
+    .catch(() => card.setProvinceOutlook(null));
 
-  const group = L.layerGroup();
+  const openMeteo = createForecastSource({ key: 'open-meteo', name: 'Open-Meteo', card });
+  const tmd = createForecastSource({ key: 'tmd', name: 'TMD', card });
+  card.registerSources([openMeteo, tmd]);
 
-  let forecast = null;
   try {
-    forecast = await loadProvinceForecast(provinceName);
+    openMeteo.setGrid(await loadFastForecastGrid(bounds));
   } catch (error) {
-    console.warn('TMD forecast unavailable:', error.message);
+    openMeteo.setStatus(`unavailable (${error.message})`);
   }
 
-  if (!forecast || !boundary) {
-    return {
-      layer: group,
-      label: 'Rain Forecast (no TMD data)',
-      available: false,
-      forecast: null
-    };
-  }
-
-  // The province boundary layer is already on screen in orange, so a faint
-  // same-coloured outline disappeared entirely. A solid tint plus an
-  // always-visible chip makes the forecast unmissable at any zoom.
-  const shape = L.geoJSON(boundary, {
-    style: { weight: 2.5, fillOpacity: 0.3, dashArray: '8 6' }
-  });
-  shape.bindTooltip('', { sticky: true });
-  shape.bindPopup('', { maxWidth: 320 });
-  group.addLayer(shape);
-
-  const chip = L.marker(shape.getBounds().getCenter(), {
-    interactive: true,
-    keyboard: false,
-    icon: L.divIcon({ className: 'wx-chip-anchor', html: '', iconSize: null })
-  });
-  chip.bindPopup('', { maxWidth: 320 });
-  group.addLayer(chip);
-
-  // One slider step per forecast day. The endpoint in use is daily-only;
-  // with an nwpapi OAuth token the same control would carry hourly steps.
-  let sliderLabel = null;
-  let sliderInput = null;
-
-  function applyDay(index) {
-    const day = forecast.days[index];
-    const style = forecastStyleFor(day.rainChance);
-    const when = index === 0 ? 'today' : shortDate(day);
-
-    shape.setStyle({ color: style.color, fillColor: style.color });
-    shape.setTooltipContent(
-      `Rain ${when}: <strong>${day.rainChance}%</strong> (${style.text})`
-    );
-
-    const popup = forecastPopup(forecast, index);
-    shape.setPopupContent(popup);
-    chip.setPopupContent(popup);
-    chip.setIcon(
-      L.divIcon({
-        className: 'wx-chip-anchor',
-        html:
-          `<span class="wx-chip" style="border-color:${style.color}">` +
-          `Rain ${when}: <strong>${day.rainChance}%</strong></span>`,
-        iconSize: null
+  if (config.tmdToken) {
+    tmd.setStatus('loading, about a minute');
+    loadTmdForecastGrid(bounds)
+      .then((grid) => {
+        if (grid?.points?.length && grid.times.length) {
+          tmd.setGrid(grid);
+          console.info(
+            `Weather: TMD forecast ready, ${grid.points.length} points at ${grid.resolutionText}`
+          );
+        } else {
+          tmd.setStatus('no data returned');
+        }
       })
-    );
-
-    if (sliderLabel) {
-      sliderLabel.textContent = `${shortDate(day)} · ${day.rainChance}% (${style.text})`;
-    }
+      .catch((error) => tmd.setStatus(error.message));
+  } else {
+    tmd.setStatus('no token configured');
   }
 
-  const TimeControl = L.Control.extend({
-    options: { position: 'topleft' },
+  card.show(openMeteo.available ? 'open-meteo' : 'tmd', { animate: false });
 
-    onAdd() {
-      const container = L.DomUtil.create('div', 'wx-time-control');
-      container.innerHTML =
-        '<span class="wx-time-title">TMD forecast</span>' +
-        `<input type="range" min="0" max="${forecast.days.length - 1}" step="1" value="0" />` +
-        '<span class="wx-time-label"></span>';
+  return { openMeteo, tmd, card };
+}
 
-      // The slider must not drag or zoom the map underneath it.
-      L.DomEvent.disableClickPropagation(container);
-      L.DomEvent.disableScrollPropagation(container);
+/** One forecast provider: a map layer plus the grid behind it, if any. */
+function createForecastSource({ key, name, card }) {
+  const group = L.layerGroup();
+  const state = { key, name, grid: null, heat: null, status: 'loading' };
 
-      sliderInput = container.querySelector('input');
-      sliderLabel = container.querySelector('.wx-time-label');
-      sliderInput.addEventListener('input', () => applyDay(Number(sliderInput.value)));
-      applyDay(Number(sliderInput.value));
-      return container;
-    },
-
-    onRemove() {
-      sliderLabel = null;
-      sliderInput = null;
-    }
-  });
-
-  // The control follows the layer checkbox: on the map only while the
-  // forecast is.
-  const timeControl = new TimeControl();
-  group.on('add', (event) => timeControl.addTo(event.target._map));
-  group.on('remove', () => timeControl.remove());
-
-  applyDay(0);
+  group.on('add', (event) => card.onSourceShown(key, event.target._map));
+  group.on('remove', (event) => card.onSourceHidden(key, event.target._map));
 
   return {
+    key,
+    name,
     layer: group,
-    label: 'Rain Forecast (TMD)',
-    available: true,
-    forecast
+    label: `Rain Forecast (${name})`,
+    state,
+
+    get available() {
+      return Boolean(state.grid);
+    },
+
+    get source() {
+      return name;
+    },
+
+    setGrid(grid) {
+      if (state.heat) {
+        group.removeLayer(state.heat.overlay);
+      }
+
+      state.grid = grid;
+      state.heat = createForecastGridLayer(grid);
+      state.status = '';
+      group.addLayer(state.heat.overlay);
+      card.onSourceUpdated(key);
+    },
+
+    setStatus(text) {
+      state.status = text;
+      card.onSourceUpdated(key);
+    }
   };
 }
 
-function shortDate(day) {
-  return day.date.toLocaleDateString('en-GB', {
-    weekday: 'short',
-    day: 'numeric',
-    month: 'short',
-    timeZone: 'UTC'
+/**
+ * The card in the analysis panel: timeline, readouts, colour key, plus the
+ * map-side readout and chance-of-rain chip. One instance serves every source.
+ */
+function createForecastCard({ boundary }) {
+  const dom = {
+    source: document.querySelector('#forecast-source'),
+    timeline: document.querySelector('#forecast-timeline'),
+    track: document.querySelector('#forecast-track'),
+    head: document.querySelector('#forecast-head'),
+    headLabel: document.querySelector('#forecast-head-label'),
+    now: document.querySelector('#forecast-now'),
+    peak: document.querySelector('#forecast-peak'),
+    total: document.querySelector('#forecast-total'),
+    gradient: document.querySelector('#forecast-gradient'),
+    ticks: document.querySelector('#forecast-ticks')
+  };
+
+  dom.gradient.style.background = legendGradient();
+  dom.ticks.innerHTML =
+    FORECAST_LEGEND.map((stop) => `<span>${stop.mmPerHour}</span>`).join('') + '<span>mm/h</span>';
+
+  const sources = new Map();
+  let activeKey = null;
+  let days = [];
+  let stepCount = 0;
+  let current = 0;
+  // The moment on screen, kept across source switches so the playhead lands
+  // on the same hour in the other run rather than the same fraction of a
+  // different span.
+  let lookingAt = null;
+  let provinceOutlook = null;
+  let attachedMap = null;
+  let swapToken = 0;
+
+  const active = () => (activeKey ? sources.get(activeKey)?.state : null);
+  const fractionOf = (index) => (stepCount <= 1 ? 0 : index / (stepCount - 1));
+  const dayOfStep = (index) => days.find((day) => day.steps.includes(index)) || days[0];
+
+  // --- chance-of-rain chip ---------------------------------------------------
+  const chip = boundary
+    ? L.marker(polygonCentroid(boundary), {
+        interactive: false,
+        keyboard: false,
+        icon: L.divIcon({ className: 'wx-chip-anchor', html: '', iconSize: null })
+      })
+    : null;
+  let chipHtml = '';
+
+  function outlookFor(date) {
+    if (!provinceOutlook) {
+      return null;
+    }
+
+    return (
+      provinceOutlook.days.find((entry) => entry.date.toISOString().slice(0, 10) === date) || null
+    );
+  }
+
+  function updateChip() {
+    if (!chip) {
+      return;
+    }
+
+    const zoom = attachedMap ? attachedMap.getZoom() : config.forecastChipMinZoom;
+    chip.setIcon(
+      L.divIcon({
+        className: 'wx-chip-anchor',
+        html: zoom >= config.forecastChipMinZoom ? chipHtml : '',
+        iconSize: null
+      })
+    );
+  }
+
+  // --- readouts --------------------------------------------------------------
+  function wettestDailyTotal(grid, steps) {
+    let wettest = 0;
+    for (const point of grid.points) {
+      let sum = 0;
+      for (const step of steps) {
+        sum += Number(point.rain[step] ?? 0);
+      }
+      if (sum > wettest) {
+        wettest = sum;
+      }
+    }
+    return wettest;
+  }
+
+  function clampLabel() {
+    // Measure from the centred layout, or a box pinned by an earlier pass
+    // would measure as still flush and never let go.
+    dom.head.classList.remove('timeline-head--flush-left', 'timeline-head--flush-right');
+    dom.headLabel.style.marginLeft = '0px';
+    const track = dom.track.getBoundingClientRect();
+    const label = dom.headLabel.getBoundingClientRect();
+    if (track.width === 0 || label.width === 0) {
+      return;
+    }
+
+    let shift = 0;
+    if (label.left < track.left) {
+      shift = track.left - label.left;
+    } else if (label.right > track.right) {
+      shift = track.right - label.right;
+    }
+    if (shift !== 0) {
+      dom.headLabel.style.marginLeft = `${shift.toFixed(1)}px`;
+    }
+
+    // Pushed flush with the cursor's edge, the box is pinned to it exactly
+    // and that corner goes square, so the two outlines run as one straight
+    // line: an L at the ends of the bar rather than a T.
+    const head = dom.head.getBoundingClientRect();
+    const placed = dom.headLabel.getBoundingClientRect();
+    dom.head.classList.toggle('timeline-head--flush-left', Math.abs(placed.left - head.left) < 1.5);
+    dom.head.classList.toggle('timeline-head--flush-right', Math.abs(placed.right - head.right) < 1.5);
+  }
+
+  function setStep(index) {
+    const state = active();
+    if (!state?.grid) {
+      return;
+    }
+
+    current = Math.max(0, Math.min(stepCount - 1, index));
+    lookingAt = Date.parse(state.grid.times[current]) || lookingAt;
+
+    const { peak } = state.heat.showStep(current);
+    const day = dayOfStep(current);
+
+    dom.peak.textContent = `${peak.toFixed(1)} mm/h`;
+    dom.total.textContent = `${wettestDailyTotal(state.grid, day.steps).toFixed(1)} mm`;
+    dom.timeline.style.setProperty('--x', `${(fractionOf(current) * 100).toFixed(3)}%`);
+    dom.headLabel.textContent = `${day.short} ${String(state.grid.times[current]).slice(11, 16)}`;
+    dom.track.setAttribute('aria-valuenow', String(current));
+    dom.track.setAttribute('aria-valuetext', dom.headLabel.textContent);
+    clampLabel();
+
+    const outlook = outlookFor(day.date);
+    chipHtml = outlook
+      ? `<span class="wx-chip" style="border-color:${forecastStyleFor(outlook.rainChance).color}">` +
+        `<strong>${outlook.rainChance}%</strong> chance of rain</span>`
+      : '';
+    updateChip();
+  }
+
+  /** Nearest step in the active grid to the moment last looked at. */
+  function stepNearest(target) {
+    const state = active();
+    if (!state?.grid || !Number.isFinite(target)) {
+      return 0;
+    }
+
+    let best = 0;
+    let bestGap = Infinity;
+    state.grid.times.forEach((time, index) => {
+      const gap = Math.abs(Date.parse(time) - target);
+      if (gap < bestGap) {
+        bestGap = gap;
+        best = index;
+      }
+    });
+    return best;
+  }
+
+  // --- timeline --------------------------------------------------------------
+  function buildTimeline() {
+    const state = active();
+
+    if (!state?.grid) {
+      const text = state ? `${state.name} · ${state.status || 'loading'}` : 'no forecast';
+      dom.source.textContent = text;
+      dom.track.innerHTML = `<span class="timeline-day timeline-day--status">${state?.status || 'loading'}</span>`;
+      dom.timeline.style.setProperty('--x', '0%');
+      dom.headLabel.textContent = '--:--';
+      dom.now.hidden = true;
+      dom.peak.textContent = '-';
+      dom.total.textContent = '-';
+      days = [];
+      stepCount = 0;
+      chipHtml = '';
+      updateChip();
+      return;
+    }
+
+    const { grid } = state;
+    days = groupByDay(grid.times);
+    stepCount = grid.times.length;
+
+    // "hourly" is already implied by the timeline.
+    dom.source.textContent = `${state.name} · ${grid.resolutionText.split(',')[0]}`;
+    dom.track.innerHTML = days
+      .map((day) => `<span class="timeline-day" style="flex-grow:${day.steps.length}">${day.short}</span>`)
+      .join('');
+    dom.track.setAttribute('aria-valuemax', String(stepCount - 1));
+
+    const stamp = new Date();
+    const nowKey =
+      `${stamp.getFullYear()}-${String(stamp.getMonth() + 1).padStart(2, '0')}-` +
+      `${String(stamp.getDate()).padStart(2, '0')}T${String(stamp.getHours()).padStart(2, '0')}`;
+    const nowStep = grid.times.findIndex((time) => String(time).startsWith(nowKey));
+    dom.now.hidden = nowStep < 0;
+    if (nowStep >= 0) {
+      dom.now.style.left = `${(fractionOf(nowStep) * 100).toFixed(3)}%`;
+    }
+
+    // Land on the hour being looked at before the switch; failing that, now.
+    const target = Number.isFinite(lookingAt) ? lookingAt : Date.now();
+    setStep(stepNearest(target));
+  }
+
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /** Rebuild the timeline for the active source, sliding the old one away. */
+  async function show(key, { animate = true } = {}) {
+    activeKey = key;
+    const token = ++swapToken;
+
+    if (!animate) {
+      buildTimeline();
+      return;
+    }
+
+    dom.timeline.classList.add('timeline--leaving');
+    await wait(170);
+    if (token !== swapToken) {
+      return;
+    }
+
+    buildTimeline();
+    dom.timeline.classList.remove('timeline--leaving');
+    dom.timeline.classList.add('timeline--entering');
+    void dom.track.offsetWidth;
+    dom.timeline.classList.remove('timeline--entering');
+  }
+
+  // --- scrubbing -------------------------------------------------------------
+  function stepAt(clientX) {
+    const rect = dom.track.getBoundingClientRect();
+    if (rect.width <= 0 || stepCount === 0) {
+      return current;
+    }
+
+    const fraction = (clientX - rect.left) / rect.width;
+    return Math.round(Math.max(0, Math.min(1, fraction)) * (stepCount - 1));
+  }
+
+  // A pointer reports moves faster than the screen refreshes, and each one
+  // would otherwise redraw the whole heatmap. Coalescing them means at most
+  // one redraw per frame, of the position the pointer actually reached.
+  let pendingStep = null;
+  let pendingFrame = 0;
+  function scrubTo(index) {
+    pendingStep = index;
+    if (pendingFrame) {
+      return;
+    }
+
+    pendingFrame = requestAnimationFrame(() => {
+      pendingFrame = 0;
+      const target = pendingStep;
+      pendingStep = null;
+      if (target !== null) {
+        setStep(target);
+      }
+    });
+  }
+
+  let dragging = false;
+  dom.track.addEventListener('pointerdown', (event) => {
+    dragging = true;
+    dom.track.setPointerCapture(event.pointerId);
+    setStep(stepAt(event.clientX));
+    event.preventDefault();
   });
-}
+  dom.track.addEventListener('pointermove', (event) => {
+    if (dragging) {
+      scrubTo(stepAt(event.clientX));
+    }
+  });
+  for (const type of ['pointerup', 'pointercancel']) {
+    dom.track.addEventListener(type, (event) => {
+      dragging = false;
+      if (dom.track.hasPointerCapture(event.pointerId)) {
+        dom.track.releasePointerCapture(event.pointerId);
+      }
+    });
+  }
+  dom.track.addEventListener('keydown', (event) => {
+    const jump = { ArrowLeft: -1, ArrowRight: 1, PageDown: -24, PageUp: 24 }[event.key];
+    if (jump === undefined) {
+      return;
+    }
+    setStep(current + jump);
+    event.preventDefault();
+  });
 
-function forecastPopup(forecast, selectedIndex = 0) {
-  const rows = forecast.days
-    .map((day, index) => {
-      const style = forecastStyleFor(day.rainChance);
-      const date = shortDate(day);
+  // --- map readout -----------------------------------------------------------
+  // The x offset is deliberate. A pointer's hotspot is the arrow's tip, at the
+  // top-left of the glyph, so a readout centred on the hotspot sits visibly
+  // left of the arrow a user is looking at; nine pixels puts it over the glyph.
+  const readout = L.tooltip({ sticky: true, direction: 'top', offset: [9, -4], className: 'wx-heat-tip' });
 
-      return (
-        `<tr${index === selectedIndex ? ' class="wx-selected"' : ''}><td>${date}</td>` +
-        `<td><span class="wx-dot" style="background:${style.color}"></span>${day.rainChance}%</td>` +
-        `<td>${day.minTemp}-${day.maxTemp}°C</td>` +
-        `<td>${day.description}</td></tr>`
-      );
-    })
-    .join('');
+  function onMove(event) {
+    const state = active();
+    const value = state?.heat ? state.heat.valueAt(event.latlng.lat, event.latlng.lng) : null;
+    if (value === null || value === undefined) {
+      readout.close();
+      return;
+    }
 
-  return (
-    `<strong>${forecast.province} rainfall outlook</strong>` +
-    '<table class="wx-forecast">' +
-    '<thead><tr><th>Day</th><th>Rain</th><th>Temp</th><th>Outlook</th></tr></thead>' +
-    `<tbody>${rows}</tbody></table>` +
-    `<small>Thai Meteorological Department, issued ${forecast.issued}</small>`
-  );
+    readout
+      .setLatLng(event.latlng)
+      .setContent(
+        `<strong>${value.toFixed(1)} mm/h</strong>` +
+          `<small>${state.name} · ${state.grid.resolutionText.split(',')[0]}</small>`
+      )
+      .openOn(event.target);
+  }
+
+  const onZoom = () => updateChip();
+
+  function anySourceOnMap(map) {
+    for (const source of sources.values()) {
+      if (map.hasLayer(source.layer)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  return {
+    registerSources(list) {
+      for (const source of list) {
+        sources.set(source.key, source);
+      }
+    },
+
+    setProvinceOutlook(outlook) {
+      provinceOutlook = outlook;
+      if (active()?.grid) {
+        setStep(current);
+      }
+    },
+
+    show,
+
+    /** A source's layer was switched on: it takes the card, and the other goes. */
+    onSourceShown(key, map) {
+      // Deferred a tick on purpose. Leaflet's layers control ignores layer
+      // changes while it is handling the click that caused this, so removing
+      // the sibling synchronously took it off the map but left its checkbox
+      // ticked. After the click completes the control resyncs normally.
+      setTimeout(() => {
+        for (const source of sources.values()) {
+          if (source.key !== key && map.hasLayer(source.layer)) {
+            map.removeLayer(source.layer);
+          }
+        }
+      }, 0);
+
+      if (attachedMap !== map) {
+        attachedMap = map;
+        map.on('mousemove', onMove);
+        map.on('zoomend', onZoom);
+        if (chip) {
+          chip.addTo(map);
+        }
+      }
+
+      show(key, { animate: true });
+    },
+
+    onSourceHidden(key, map) {
+      if (map && !anySourceOnMap(map)) {
+        map.off('mousemove', onMove);
+        map.off('zoomend', onZoom);
+        readout.close();
+        if (chip) {
+          chip.remove();
+        }
+        attachedMap = null;
+      }
+      // The card keeps showing the last source: the forecast is worth reading
+      // whether or not it is drawn on the map.
+    },
+
+    /** A source's data changed; if it is the one on the card, redraw it. */
+    onSourceUpdated(key) {
+      if (key === activeKey) {
+        show(key, { animate: Boolean(active()?.grid) });
+      }
+    }
+  };
 }
 
 async function loadProvinceForecast(provinceName) {
@@ -344,199 +674,6 @@ async function loadProvinceForecast(provinceName) {
  * Same control furniture as the province fallback below it, so the layer
  * behaves identically whichever provider answered.
  */
-function buildGridForecastLayer(grid, provinceOutlook, boundary) {
-  const { group, showStep, valueAt, stepCount } = createForecastGridLayer(grid);
-
-  // The timeline is split into a day picker and an hour slider. As one slider
-  // over every hour it ran to 168 steps, where a single pixel of travel jumped
-  // hours and landing on a particular morning took real effort.
-  const days = groupByDay(grid.times);
-
-  const dom = {
-    card: document.querySelector('#forecast-card'),
-    source: document.querySelector('#forecast-source'),
-    day: document.querySelector('#forecast-day'),
-    dayValue: document.querySelector('#forecast-day-value'),
-    hour: document.querySelector('#forecast-hour'),
-    hourValue: document.querySelector('#forecast-hour-value'),
-    peak: document.querySelector('#forecast-peak'),
-    total: document.querySelector('#forecast-total'),
-    gradient: document.querySelector('#forecast-gradient'),
-    ticks: document.querySelector('#forecast-ticks')
-  };
-
-  // The province chance-of-rain, anchored at the centre of the province's own
-  // area. Placing it at a fraction of the bounding box put it below the
-  // southern border entirely, out over Rayong.
-  let percentChip = null;
-  let percentHtml = '';
-  if (provinceOutlook && boundary) {
-    percentChip = L.marker(polygonCentroid(boundary), {
-      interactive: false,
-      keyboard: false,
-      icon: L.divIcon({ className: 'wx-chip-anchor', html: '', iconSize: null })
-    });
-    group.addLayer(percentChip);
-  }
-
-  /**
-   * Show the chip only once the province fills enough of the view.
-   *
-   * Zoomed far out the label keeps its pixel size while the province shrinks
-   * under it, so it ends up a caption floating over half of Thailand.
-   */
-  function updateChipVisibility(zoom) {
-    if (!percentChip) {
-      return;
-    }
-
-    const visible = zoom >= config.forecastChipMinZoom;
-    percentChip.setIcon(
-      L.divIcon({
-        className: 'wx-chip-anchor',
-        html: visible ? percentHtml : '',
-        iconSize: null
-      })
-    );
-  }
-
-  /** Match a forecast day to TMD's province entry for the same date. */
-  function outlookFor(date) {
-    if (!provinceOutlook) {
-      return null;
-    }
-
-    return (
-      provinceOutlook.days.find(
-        (entry) => entry.date.toISOString().slice(0, 10) === date
-      ) || null
-    );
-  }
-
-  function applyStep(index) {
-    const { peak } = showStep(index);
-    dom.peak.textContent = `${peak.toFixed(1)} mm/h`;
-  }
-
-  /** The hour slider spans whatever hours that day actually carries. */
-  function selectDay(dayIndex) {
-    const day = days[dayIndex];
-    dom.hour.min = '0';
-    dom.hour.max = String(day.steps.length - 1);
-    dom.hour.value = String(Math.min(Number(dom.hour.value), day.steps.length - 1));
-    dom.dayValue.textContent = day.label;
-
-    const outlook = outlookFor(day.date);
-    if (percentChip) {
-      percentHtml = outlook
-        ? `<span class="wx-chip" style="border-color:${forecastStyleFor(outlook.rainChance).color}">` +
-          `<strong>${outlook.rainChance}%</strong> chance of rain</span>`
-        : '';
-      updateChipVisibility(mapZoom());
-    }
-
-    // The day's total at the wettest point. Summing the area-wide peak hour
-    // by hour instead would add up rain that fell in different places, and
-    // read far higher than anywhere actually gets.
-    dom.total.textContent = `${wettestDailyTotal(day.steps).toFixed(1)} mm`;
-
-    selectHour(Number(dom.hour.value));
-  }
-
-  function selectHour(hourIndex) {
-    const day = days[Number(dom.day.value)];
-    const step = day.steps[hourIndex];
-    dom.hourValue.textContent = day.hours[hourIndex];
-    applyStep(step);
-  }
-
-  /** The largest per-point total across a day's steps. */
-  function wettestDailyTotal(steps) {
-    let wettest = 0;
-    for (const point of grid.points) {
-      let sum = 0;
-      for (const step of steps) {
-        sum += Number(point.rain[step] ?? 0);
-      }
-      if (sum > wettest) {
-        wettest = sum;
-      }
-    }
-    return wettest;
-  }
-
-  function buildCard() {
-    // "hourly" is already implied by the hour slider beside it.
-    dom.source.textContent = `${grid.source} · ${grid.resolutionText.split(',')[0]}`;
-    dom.day.min = '0';
-    dom.day.max = String(days.length - 1);
-    dom.day.value = '0';
-    dom.gradient.style.background = legendGradient();
-    dom.ticks.innerHTML =
-      FORECAST_LEGEND.map((stop) => `<span>${stop.mmPerHour}</span>`).join('') +
-      '<span>mm/h</span>';
-
-    // Open on the hour it is now, which is the one anybody looks at first.
-    const nowHour = new Date().getHours();
-    const todaySteps = days[0].hours.findIndex((clock) => Number(clock.slice(0, 2)) === nowHour);
-    dom.hour.value = String(todaySteps >= 0 ? todaySteps : 0);
-
-    selectDay(0);
-  }
-
-  dom.day.addEventListener('input', () => selectDay(Number(dom.day.value)));
-  dom.hour.addEventListener('input', () => selectHour(Number(dom.hour.value)));
-
-  // An image overlay cannot carry per-cell tooltips, so the readout follows
-  // the cursor instead - which also reads better than hovering tiny squares.
-  const readout = L.tooltip({ sticky: true, direction: 'top', offset: [0, -12], className: 'wx-heat-tip' });
-  function onMove(event) {
-    const value = valueAt(event.latlng.lat, event.latlng.lng);
-    if (value === null) {
-      readout.close();
-      return;
-    }
-
-    readout
-      .setLatLng(event.latlng)
-      .setContent(
-        `<strong>${value.toFixed(1)} mm/h</strong> forecast<br>` +
-          `<small>${grid.sourceLabel}, ${grid.resolutionText}</small>`
-      )
-      .openOn(event.target);
-  }
-
-  // The card is always on show - the forecast is worth reading whether or not
-  // it is drawn on the map - so only the hover readout follows the toggle.
-  let attachedMap = null;
-  const mapZoom = () => (attachedMap ? attachedMap.getZoom() : config.forecastChipMinZoom);
-  const onZoom = () => updateChipVisibility(mapZoom());
-
-  group.on('add', (event) => {
-    attachedMap = event.target._map;
-    attachedMap.on('mousemove', onMove);
-    attachedMap.on('zoomend', onZoom);
-    updateChipVisibility(mapZoom());
-  });
-  group.on('remove', (event) => {
-    event.target._map?.off('mousemove', onMove);
-    event.target._map?.off('zoomend', onZoom);
-    attachedMap = null;
-    readout.close();
-  });
-
-  buildCard();
-
-  return {
-    layer: group,
-    label: `Rain Forecast (${grid.source})`,
-    available: true,
-    gridded: true,
-    source: grid.source,
-    forecast: null,
-    stepCount
-  };
-}
 
 /**
  * Centre of area of the largest ring in a GeoJSON polygon.
@@ -602,6 +739,12 @@ function groupByDay(times) {
           month: 'short',
           timeZone: 'UTC'
         }),
+        // Short enough to fit a timeline cell one seventh of a panel wide.
+        short: parsed.toLocaleDateString('en-GB', {
+          weekday: 'short',
+          day: 'numeric',
+          timeZone: 'UTC'
+        }),
         weekday: days.length === 0 ? 'today' : `+${days.length}d`,
         steps: [],
         hours: []
@@ -649,8 +792,10 @@ function gaugeStyleFor(mm) {
 
 function gaugeRadius(mm) {
   // Square-root so a 180 mm downpour does not swamp the map, while the
-  // difference between 1 mm and 10 mm stays visible.
-  return 4 + Math.min(11, Math.sqrt(Math.max(0, mm)) * 1.4);
+  // difference between 1 mm and 10 mm stays visible. The floor is a target a
+  // fingertip or a hurried mouse can hit: at 4 px a dry gauge was 8 px
+  // across. Pixel radius, so the dot keeps its size at every zoom.
+  return 7 + Math.min(9, Math.sqrt(Math.max(0, mm)) * 1.3);
 }
 
 export async function createRainGaugeLayer({ isInside } = {}) {
@@ -694,8 +839,8 @@ export async function createRainGaugeLayer({ isInside } = {}) {
       // with the forecast heatmap drawn over the same ground.
       pane: 'markerPane',
       radius: gaugeRadius(station.rainMm),
-      color: '#ffffff',
-      weight: 1.5,
+      color: '#ff69b4',
+      weight: 2,
       fillColor: style.color,
       fillOpacity: 0.9
     });

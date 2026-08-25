@@ -16,6 +16,7 @@ import {
   populateFlowAccumulationLayer,
   populateFlowPathLayer
 } from './flow.js';
+import { createFlowParticleLayer } from './flowParticles.js';
 import {
   createPipeNetworkLayer,
   createRiverLayer,
@@ -35,7 +36,7 @@ import { createPipeSimulation } from './pipeSim.js';
 import { createRainfallSimulator } from './rainfallSim.js';
 import {
   createCloudLayer,
-  createRainForecastLayer,
+  createRainForecastLayers,
   createRainGaugeLayer
 } from './weather.js';
 import { config } from './config.js';
@@ -62,6 +63,7 @@ export async function initializeMap() {
 
   const boundaryLayer = L.geoJSON(chonburiBoundary, {
     style: {
+      className: 'province-outline',
       color: '#f97316',
       weight: 3,
       fillColor: '#fb923c',
@@ -113,15 +115,15 @@ export async function initializeMap() {
 
   // Live weather: satellite tiles need no fetch, the TMD forecast does.
   const cloudCover = createCloudLayer({ bounds: dem.bounds });
-  const [rainForecast, rainGauges] = await Promise.all([
-    createRainForecastLayer({ boundary: chonburiBoundary, bounds: dem.bounds }),
+  const [forecast, rainGauges] = await Promise.all([
+    createRainForecastLayers({ boundary: chonburiBoundary, bounds: dem.bounds }),
     createRainGaugeLayer({ isInside: isInsideProvince })
   ]);
   console.info(
     `Weather: GSMaP frame ${cloudCover.frame.year}-${cloudCover.frame.month}-` +
       `${cloudCover.frame.day} ${cloudCover.frame.hour}:00 UTC, ` +
-      `rain forecast ${rainForecast.available ? rainForecast.source || 'province outlook' : 'unavailable'}` +
-      `${rainForecast.gridded ? ' (gridded)' : ''}, ` +
+      `rain forecast Open-Meteo ${forecast.openMeteo.available ? 'ready' : 'unavailable'}, ` +
+      `TMD ${config.tmdToken ? 'loading in background' : 'no token'}, ` +
       `${rainGauges.count} of ${rainGauges.totalCount} TMD rain gauges in area`
   );
   cloudCover.updateBlur(map.getZoom());
@@ -179,11 +181,32 @@ export async function initializeMap() {
     );
   }
   const visibleFlowDirection = flowDirection.filter(isInsideAnalysis);
-  const flowDirectionLayer = createFlowDirectionLayer(visibleFlowDirection, {
+  // Particles need the grid to interpolate across, and motion the viewer has
+  // not asked the browser to spare them; otherwise the static arrows.
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+  const flowArrowOptions = {
     cellSizeDegrees: analysisGrid
       ? (analysisGrid.bounds.north - analysisGrid.bounds.south) / analysisGrid.rows
       : 0
-  });
+  };
+  const particleFlowDirection =
+    config.flowParticles && analysisGrid && !reducedMotion
+      ? createFlowParticleLayer(visibleFlowDirection, analysisGrid, {
+          isDark: (name) => name === 'Satellite'
+        })
+      : null;
+  // The arrows are the classic look for this layer, built on first request.
+  let arrowFlowDirection = null;
+  const flowDirectionArrows = () => {
+    if (!arrowFlowDirection) {
+      arrowFlowDirection = createFlowDirectionLayer(visibleFlowDirection, flowArrowOptions);
+    }
+    return arrowFlowDirection;
+  };
+  // A shell, so Shift + tick can swap which rendering the checkbox shows.
+  const flowDirectionLayer = particleFlowDirection
+    ? L.layerGroup([particleFlowDirection])
+    : createFlowDirectionLayer(visibleFlowDirection, flowArrowOptions);
   const visibleFlowAccumulation = flowAccumulation.filter(isInsideAnalysis);
   const flowPathOptions = { cellAreaM2: analysisCellAreaM2(analysisGrid) };
   const flowPathLayer = createFlowPathLayer(
@@ -227,6 +250,18 @@ export async function initializeMap() {
   let rainRefreshTimer = null;
   let lastRainRefresh = 0;
   let streetRenderTimer = null;
+  // Shift held while ticking a flow layer in the control asks for the classic
+  // rendering (dashed lines, or the arrows for Flow Direction). Captured
+  // before Leaflet handles the click, so the overlayadd handler can read it.
+  let shiftTick = false;
+  document.addEventListener(
+    'click',
+    (event) => {
+      shiftTick = event.shiftKey === true;
+    },
+    true
+  );
+  let flowPathsClassic = false;
   let streetRenderDelay = STREET_RENDER_MS;
   // Declared here for the same reason: the tick handler below refreshes it.
   let samplePoint = null;
@@ -243,6 +278,10 @@ export async function initializeMap() {
     // network right now, which falls as it drains - unlike the cumulative
     // rain volume beside it.
     getWaterOnMapM3: () => (roadFlow.dynamic ? roadFlow.dynamic.totals().storedM3 : 0),
+
+    // Where street water can exist at all, measured from the graph itself
+    // rather than assumed from the build-time bbox.
+    streetCoverage: streetGraphBounds(roadFlow.graph),
 
     // Every simulation tick advances the street water: rain lands at the
     // current intensity and the water crawls downstream at street-flow speed.
@@ -316,12 +355,10 @@ export async function initializeMap() {
     if (!rainLayerActive) {
       // Uniform restore for every grid layer, whether or not it is on show:
       // switching a restored layer on later must not reveal stale rain data.
-      populateFlowPathLayer(
-        flowPathLayer,
-        visibleFlowDirection,
-        visibleFlowAccumulation,
-        flowPathOptions
-      );
+      populateFlowPathLayer(flowPathLayer, visibleFlowDirection, visibleFlowAccumulation, {
+        ...flowPathOptions,
+        classic: flowPathsClassic
+      });
       populateFlowAccumulationLayer(flowAccumulationLayer, visibleFlowAccumulation);
 
       if (roadFlow.refresh) {
@@ -372,7 +409,8 @@ export async function initializeMap() {
       populateFlowPathLayer(flowPathLayer, visibleFlowDirection, visibleWeighted, {
         ...flowPathOptions,
         minUpstream,
-        rainMode: true
+        rainMode: true,
+        classic: flowPathsClassic
       });
     }
 
@@ -399,6 +437,21 @@ export async function initializeMap() {
   }
 
   map.on('overlayadd', (event) => {
+    // Shift on the tick chooses the classic rendering for that layer.
+    if (event.layer === flowDirectionLayer && particleFlowDirection) {
+      const wanted = shiftTick ? flowDirectionArrows() : particleFlowDirection;
+      if (!flowDirectionLayer.hasLayer(wanted)) {
+        flowDirectionLayer.clearLayers();
+        flowDirectionLayer.addLayer(wanted);
+      }
+    }
+    if (event.layer === flowPathLayer) {
+      flowPathsClassic = shiftTick;
+    }
+    if (event.layer === roadFlow.layer) {
+      roadFlow.setClassic?.(shiftTick);
+    }
+
     if (event.layer === rainfall.layer) {
       rainLayerActive = true;
       applyFlowWeighting();
@@ -409,8 +462,19 @@ export async function initializeMap() {
     ) {
       // Switched on while rain mode is active: rebuild rather than show stale.
       applyFlowWeighting();
-    } else if (rainLayerActive && event.layer === roadFlow.layer) {
-      roadFlow.dynamic?.render();
+    } else if (event.layer === flowPathLayer) {
+      // Repopulate in the just-chosen style.
+      populateFlowPathLayer(flowPathLayer, visibleFlowDirection, visibleFlowAccumulation, {
+        ...flowPathOptions,
+        classic: flowPathsClassic
+      });
+    } else if (event.layer === roadFlow.layer) {
+      // Rebuild in the just-chosen style; in rain mode with live water.
+      if (rainLayerActive) {
+        roadFlow.dynamic?.render();
+      } else {
+        roadFlow.refresh(null);
+      }
     }
   });
 
@@ -445,8 +509,13 @@ export async function initializeMap() {
     null,
     {
       [cloudCover.label]: cloudCover.layer,
-      [rainForecast.available ? rainForecast.label : wipLabel(rainForecast.label)]:
-        rainForecast.layer,
+      [forecast.openMeteo.available
+        ? forecast.openMeteo.label
+        : wipLabel(forecast.openMeteo.label)]: forecast.openMeteo.layer,
+      // TMD arrives a minute or so after load; the label reflects whether it
+      // can arrive at all, which is what a token decides.
+      [config.tmdToken ? forecast.tmd.label : wipLabel(`${forecast.tmd.label} - no token`)]:
+        forecast.tmd.layer,
       [rainGauges.available ? rainGauges.label : wipLabel(rainGauges.label)]: rainGauges.layer
     },
     { collapsed: false }
@@ -462,22 +531,12 @@ export async function initializeMap() {
   matchLayerControlWidths();
   labelLayerControl(geographyControl, 'Geography');
   labelLayerControl(simulationControl, 'Water Simulation');
+  hintClassicToggle(simulationControl, [flowDirectionLayer, flowPathLayer, roadFlow.layer]);
   labelLayerControl(weatherControl, 'Weather');
 
   map.on('mousemove', (event) => {
     mouseCoordinates.update(event.latlng);
   });
-
-  // Dashes only read as flow when a chain spans several dash periods on
-  // screen, so they are switched off for wide views.
-  function updateFlowDashes() {
-    map
-      .getContainer()
-      .classList.toggle('leaflet-container--flat-flow', map.getZoom() < config.flowDashMinZoom);
-  }
-
-  map.on('zoomend', updateFlowDashes);
-  updateFlowDashes();
 
   // Leaflet closes popups when a new one opens, but allows one tooltip per
   // layer to stay open at once. With elevation, contours, rivers and flow
@@ -602,6 +661,30 @@ function matchLayerControlWidths() {
 // with a class instead of a "(Placeholder)" suffix.
 // Analysis cells are rectangles in degrees; convert one to square metres so the
 // flow tooltip can report a real catchment area.
+// Extent of the street graph, for telling the simulator where street water
+// can be tracked. Null when no network loaded.
+function streetGraphBounds(graph) {
+  if (!graph?.nodeCount) {
+    return null;
+  }
+
+  let south = 90;
+  let north = -90;
+  let west = 180;
+  let east = -180;
+
+  for (let n = 0; n < graph.nodeCount; n += 1) {
+    const lat = graph.lat[n];
+    const lng = graph.lng[n];
+    if (lat < south) south = lat;
+    if (lat > north) north = lat;
+    if (lng < west) west = lng;
+    if (lng > east) east = lng;
+  }
+
+  return { south, north, west, east };
+}
+
 function analysisCellAreaM2(grid) {
   if (!grid?.bounds) {
     return 0;
@@ -631,6 +714,17 @@ function labelLayerControl(control, title) {
   const heading = L.DomUtil.create('div', 'layer-control-title');
   heading.textContent = title;
   container.insertBefore(heading, container.firstChild);
+}
+
+// The three flow layers have a classic rendering (dashes, or arrows for Flow
+// Direction) behind Shift + tick; say so on hover, or nobody would find it.
+function hintClassicToggle(control, layers) {
+  const ids = new Set(layers.map((layer) => L.Util.stamp(layer)));
+  for (const input of control._layerControlInputs || []) {
+    if (ids.has(input.layerId)) {
+      input.parentElement.title = 'Shift + click for the classic style';
+    }
+  }
 }
 
 function createElevationLayer(dem, slope, displayMask) {

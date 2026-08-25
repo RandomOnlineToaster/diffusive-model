@@ -37,6 +37,8 @@ export function createAppLayout(root) {
             <div><span>Water on map</span><strong id="sim-water">0 m&sup3;</strong></div>
           </div>
 
+          <p class="sim-note" id="sim-coverage-note" hidden></p>
+
           <div class="sim-legend"><span class="sim-legend-stops" id="sim-legend"></span><span class="sim-legend-unit">mm/h</span></div>
 
           <div class="sim-probe" id="sim-probe">Intensity 0.0 mm/h &middot; Surface 0.0 mm &middot; Total 0.0 mm</div>
@@ -51,17 +53,17 @@ export function createAppLayout(root) {
             <span class="forecast-source" id="forecast-source">loading&hellip;</span>
           </div>
 
-          <label class="field field--inline">
-            <span>Day</span>
-            <input id="forecast-day" type="range" min="0" max="0" step="1" value="0" />
-            <output id="forecast-day-value">&mdash;</output>
-          </label>
-
-          <label class="field field--inline">
-            <span>Hour</span>
-            <input id="forecast-hour" type="range" min="0" max="23" step="1" value="0" />
-            <output id="forecast-hour-value">00:00</output>
-          </label>
+          <!-- One scrub bar over the whole forecast: day cells for context,
+               a playhead for the hour. Built by weather.js. -->
+          <div class="timeline" id="forecast-timeline">
+            <div class="timeline-track" id="forecast-track" tabindex="0"
+              role="slider" aria-label="Forecast time"
+              aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"></div>
+            <div class="timeline-head" id="forecast-head">
+              <span class="timeline-head-label" id="forecast-head-label">--:--</span>
+            </div>
+            <span class="timeline-now" id="forecast-now" title="now" hidden></span>
+          </div>
 
           <div class="sim-readout">
             <div><span>At this hour</span><strong id="forecast-peak">0 mm/h</strong></div>
