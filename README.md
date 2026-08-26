@@ -13,7 +13,11 @@ storms and routes the resulting water across terrain and streets.
 - **Flow paths / accumulation / direction** — D8 routing on the DEM analysis
   grid, for the catchment-scale picture. Flow Direction, Flow Paths and
   Street Flow are all drawn as moving particle trails, the way wind maps
-  draw wind - coloured green to red by how much water they carry.
+  draw wind - coloured green to red by how much water they carry. Every
+  chain in view carries flow, spaced a runner per 40 px of itself; the
+  **Flow detail** slider trades that back for speed, keeping the longest
+  share of the chains and dropping the rest, in the smooth style and in the
+  classic Shift + tick dashes alike.
 - **Weather** — live satellite cloud cover from
   [JAXA GSMaP](https://sharaku.eorc.jaxa.jp/GSMaP/), a gridded rainfall
   forecast with an hourly slider (Shift + drag rains it onto the simulator,

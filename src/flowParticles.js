@@ -571,8 +571,70 @@ const STREAM_LIFE_SPAN = 180;
 // viewport, so their density does not change with how much network happens to
 // be on screen. With ~37 px tails, 40 px spacing inks most of a line while
 // leaving a moving gap behind every runner - which is what reads as flow.
+//
+// Spacing across the whole network is not enough to make it read, though. The
+// chains are wildly uneven - a few trunks carry most of the metres, while
+// thousands of side streets are a dozen pixels each - and runners flow
+// downstream, so they gathered on the trunks and left the rest of the map
+// blank beside the classic dashes, which ink every chain there is.
+//
+// So the spacing is applied PER CHAIN: each one in view is due a runner every
+// 40 px of itself, and never fewer than one. The fleet is the sum of those
+// dues, a runner that flows into a chain already carrying its share is sent
+// to refill one that is short instead, and a spawn looks for the short ones.
+// Every street is inked, and the trunks still carry the thickest flow.
 const TARGET_SPACING_PX = 40;
-const STREAM_MAX_COUNT = 4000;
+const STREAM_MAX_COUNT = 12000;
+// How many chains a spawn will look at before settling for one by length. A
+// full sweep would be thousands of steps for the last few runners of a full
+// network, every one of them a dead end.
+const UNCOVERED_TRIES = 96;
+
+/**
+ * How much of the network the chain layers draw, as a share of the chains in
+ * view, longest first. 1 is every one of them - a street at a time, the way
+ * the classic dashes have always been drawn. Lower keeps only the longer
+ * chains, so the picture generalises to the main channels and both renderings
+ * get cheaper with it.
+ *
+ * One value for every chain layer on the map: Flow Paths and Street Flow are
+ * read together, and a detail control that left them disagreeing would be
+ * worse than none.
+ */
+let chainDetail = 1;
+const chainLayers = new Set();
+
+export function setChainDetail(value) {
+  const next = Math.max(0.02, Math.min(1, Number(value) || 0));
+  if (next === chainDetail) {
+    return;
+  }
+
+  chainDetail = next;
+  for (const layer of chainLayers) {
+    layer._applyDetail();
+  }
+}
+
+export function chainDetailValue() {
+  return chainDetail;
+}
+
+/**
+ * The length a chain must reach to be drawn: the (1 - detail) quantile of the
+ * lengths on screen, so the share kept is the share asked for whatever the
+ * network and the zoom. Sorting a few thousand floats happens on a view
+ * change, not on a frame.
+ */
+function detailCutoff(lengths, count) {
+  if (chainDetail >= 1 || count === 0) {
+    return 0;
+  }
+
+  const sorted = lengths.subarray(0, count).slice().sort();
+  const at = Math.min(count - 1, Math.floor((1 - chainDetail) * count));
+  return sorted[at];
+}
 
 // Classic dashes: the SVG stroke was `stroke-dasharray: 5 9` marching one
 // period every 1.1 s.
@@ -741,6 +803,20 @@ const ChainParticles = L.Layer.extend({
     this._geometry = null;
     this._dark = false;
     this._raf = 0;
+    // Chains in view, which of them carry a runner, and where the next spawn
+    // starts looking for one that does not.
+    this._lineDrawn = null;
+    this._lineOnScreen = null;
+    this._visibleLines = null;
+    this._quota = null;
+    this._load = null;
+    this._chainPx = null;
+    this._lengths = null;
+    this._quotaTotal = 0;
+    this._spawnCursor = 0;
+    this._segBuf = null;
+    this._segCount = null;
+    this._visiblePx = 0;
     this._lastStep = 0;
     this._mode = 'trail';
     this._staticDrawn = false;
@@ -787,11 +863,13 @@ const ChainParticles = L.Layer.extend({
     this._ctx = this._canvas.getContext('2d');
     this.getPane().appendChild(this._canvas);
     this._originX = Number.NaN;
+    chainLayers.add(this);
     this._reset();
     this._raf = requestAnimationFrame(this._frame);
   },
 
   onRemove() {
+    chainLayers.delete(this);
     cancelAnimationFrame(this._raf);
     this._raf = 0;
     this._canvas.remove();
@@ -850,7 +928,14 @@ const ChainParticles = L.Layer.extend({
     if (!geometry || !this._canvas) {
       this._vx = null;
       this._vy = null;
-      this._lineInView = null;
+      this._lineDrawn = null;
+      this._lineOnScreen = null;
+      this._visibleLines = null;
+      this._quota = null;
+      this._load = null;
+      this._chainPx = null;
+      this._lengths = null;
+      this._quotaTotal = 0;
       this._visiblePx = 0;
       return;
     }
@@ -861,13 +946,18 @@ const ChainParticles = L.Layer.extend({
       this._vx = new Float32Array(total);
       this._vy = new Float32Array(total);
     }
-    if (!this._lineInView || this._lineInView.length !== lineCount) {
-      this._lineInView = new Uint8Array(lineCount);
+    if (!this._lineDrawn || this._lineDrawn.length !== lineCount) {
+      this._lineDrawn = new Uint8Array(lineCount);
+      this._lineOnScreen = new Uint8Array(lineCount);
+      this._quota = new Uint16Array(lineCount);
+      this._load = new Uint16Array(lineCount);
+      this._chainPx = new Float32Array(lineCount);
+      this._lengths = new Float32Array(lineCount);
     }
 
     const vx = this._vx;
     const vy = this._vy;
-    const inView = this._lineInView;
+    const drawn = this._lineDrawn;
     const width = this._canvas.width;
     const height = this._canvas.height;
     const scale = this._scale;
@@ -877,10 +967,18 @@ const ChainParticles = L.Layer.extend({
     // A generous margin so chains crossing the edge still get their dashes.
     const margin = 40 * ratio;
     let visible = 0;
+    let visibleLines = 0;
+    let quotaTotal = 0;
+    const quota = this._quota;
+    const chainPx = this._chainPx;
+    const onScreen = this._lineOnScreen;
+    let seen = 0;
 
+    // First pass: project, and measure how much of each chain is on screen.
     for (let line = 0; line < lineCount; line += 1) {
       let touches = 0;
       let prevInside = false;
+      let chainVisible = 0;
       for (let v = first[line]; v <= last[line]; v += 1) {
         const sin = Math.sin(lat[v] * DEG);
         const x = ((lng[v] / 360 + 0.5) * scale - originX) * ratio;
@@ -893,15 +991,70 @@ const ChainParticles = L.Layer.extend({
           touches = 1;
         }
         if (v > first[line] && (inside || prevInside)) {
-          visible += Math.hypot(x - vx[v - 1], y - vy[v - 1]);
+          chainVisible += Math.hypot(x - vx[v - 1], y - vy[v - 1]);
         }
         prevInside = inside;
       }
-      inView[line] = touches;
+
+      onScreen[line] = touches;
+      chainPx[line] = chainVisible / ratio;
+      if (touches) {
+        this._lengths[seen] = chainPx[line];
+        seen += 1;
+      }
     }
 
-    // In CSS pixels: the spacing target is a screen figure.
-    this._visiblePx = visible / ratio;
+    // Second pass: keep the share of them the detail control asks for,
+    // longest first, and work out what each is due.
+    const cutoff = detailCutoff(this._lengths, seen);
+    for (let line = 0; line < lineCount; line += 1) {
+      const keep = onScreen[line] && chainPx[line] >= cutoff ? 1 : 0;
+      drawn[line] = keep;
+      if (!keep) {
+        quota[line] = 0;
+        continue;
+      }
+
+      visible += chainPx[line];
+      visibleLines += 1;
+      // What this chain is due: one runner per 40 px of itself, and at least
+      // one for any chain drawn at all, however short.
+      quota[line] = Math.max(1, Math.round(chainPx[line] / TARGET_SPACING_PX));
+      quotaTotal += quota[line];
+    }
+
+    this._quotaTotal = quotaTotal;
+
+    // The chains being drawn, listed, so a spawn can walk them looking for one
+    // that is short of its share instead of scanning the whole network.
+    if (!this._visibleLines || this._visibleLines.length !== visibleLines) {
+      this._visibleLines = new Int32Array(visibleLines);
+    }
+    let at = 0;
+    for (let line = 0; line < lineCount; line += 1) {
+      if (drawn[line]) {
+        this._visibleLines[at] = line;
+        at += 1;
+      }
+    }
+    if (this._spawnCursor >= visibleLines) {
+      this._spawnCursor = 0;
+    }
+
+    // Already in CSS pixels: the spacing target is a screen figure.
+    this._visiblePx = visible;
+  },
+
+  /** The detail control moved: re-pick the chains and re-size the fleet. */
+  _applyDetail() {
+    if (!this._map || !this._geometry) {
+      return;
+    }
+
+    this._projectVertices();
+    this._resizeFleet({ keep: true });
+    // The zoomed-out dash drawing is painted once and kept; it has to go.
+    this._staticDrawn = false;
   },
 
   /**
@@ -910,10 +1063,9 @@ const ChainParticles = L.Layer.extend({
    * only the extra slots are seeded; without it everything is reseeded.
    */
   _resizeFleet({ keep }) {
-    const count = Math.max(
-      0,
-      Math.min(STREAM_MAX_COUNT, Math.round(this._visiblePx / TARGET_SPACING_PX))
-    );
+    // Exactly what the chains in view are due between them, so every street
+    // carries flow the way the classic dashes do and the long ones carry more.
+    const count = Math.max(0, Math.min(STREAM_MAX_COUNT, this._quotaTotal || 0));
 
     const had = this._line ? this._line.length : 0;
     if (had !== count) {
@@ -932,6 +1084,11 @@ const ChainParticles = L.Layer.extend({
       this._age = grow(Uint16Array, this._age);
       this._life = grow(Uint16Array, this._life);
       this._alive = grow(Uint8Array, this._alive);
+      // One segment per runner per step, gathered per colour class before
+      // stroking. Typed and preallocated: growing five JS arrays by four
+      // numbers per runner, every step, cost more than the drawing did.
+      this._segBuf = CHAIN_COLORS.map(() => new Float32Array(count * 4));
+      this._segCount = new Int32Array(CHAIN_COLORS.length);
     }
 
     if (!keep || had === 0) {
@@ -982,7 +1139,41 @@ const ChainParticles = L.Layer.extend({
     this._py[i] = vy[segment] + (vy[segment + 1] - vy[segment]) * t;
   },
 
-  /** Drop particle i on a random chain, at a random point that is on screen. */
+  /**
+   * Put particle i at `distance` along `line`, if that point is on screen.
+   * Returns whether it took.
+   */
+  _settle(i, line, distance) {
+    const { first, last, along } = this._geometry;
+    let segment = first[line];
+    while (segment < last[line] && along[segment + 1] < distance) {
+      segment += 1;
+    }
+    if (segment >= last[line]) {
+      return false;
+    }
+
+    const span = along[segment + 1] - along[segment] || 1;
+    const t = (distance - along[segment]) / span;
+    const x = this._vx[segment] + (this._vx[segment + 1] - this._vx[segment]) * t;
+    const y = this._vy[segment] + (this._vy[segment + 1] - this._vy[segment]) * t;
+    if (x < -8 || y < -8 || x > this._canvas.width + 8 || y > this._canvas.height + 8) {
+      return false;
+    }
+
+    this._line[i] = line;
+    this._seg[i] = segment;
+    this._dist[i] = distance;
+    this._px[i] = x;
+    this._py[i] = y;
+    this._age[i] = 0;
+    this._life[i] = STREAM_MIN_LIFE + Math.floor(Math.random() * STREAM_LIFE_SPAN);
+    this._alive[i] = 1;
+    return true;
+  },
+
+  /** Drop particle i on a chain that has nothing on it, or failing that, on
+   * one picked by length. */
   _spawn(i) {
     this._alive[i] = 0;
     const geometry = this._geometry;
@@ -990,12 +1181,35 @@ const ChainParticles = L.Layer.extend({
       return;
     }
 
-    const { lengthPrefix, first, last, along } = geometry;
-    const vx = this._vx;
-    const vy = this._vy;
-    const width = this._canvas.width;
-    const height = this._canvas.height;
+    const { lengthPrefix, last, along } = geometry;
 
+    // Runners flow downstream and gather on the trunks, and a spawn weighted
+    // by length only sends them back to the same trunks. Refilling a chain
+    // that is short of its due is what keeps the side streets inked.
+    const visible = this._visibleLines;
+    const load = this._load;
+    const quota = this._quota;
+    if (visible && visible.length > 0 && load) {
+      for (let tries = 0; tries < UNCOVERED_TRIES; tries += 1) {
+        const line = visible[this._spawnCursor];
+        this._spawnCursor += 1;
+        if (this._spawnCursor >= visible.length) {
+          this._spawnCursor = 0;
+        }
+
+        const length = along[last[line]];
+        if (load[line] >= quota[line] || !(length > 0)) {
+          continue;
+        }
+        if (this._settle(i, line, Math.random() * length)) {
+          load[line] += 1;
+          return;
+        }
+      }
+    }
+
+    // Every chain in view is carrying its share: spread the rest by length, so
+    // the busiest chains carry the thickest flow.
     for (let attempt = 0; attempt < SPAWN_TRIES; attempt += 1) {
       const target = Math.random() * geometry.totalMeters;
 
@@ -1011,37 +1225,16 @@ const ChainParticles = L.Layer.extend({
         }
       }
       const line = low;
-      if (!this._lineInView[line]) {
-        continue;
-      }
-      const distance = target - lengthPrefix[line];
-
-      // And which segment of the chain: walk from its first vertex.
-      let segment = first[line];
-      while (segment < last[line] && along[segment + 1] < distance) {
-        segment += 1;
-      }
-      if (segment >= last[line]) {
+      if (!this._lineDrawn[line]) {
         continue;
       }
 
-      const span = along[segment + 1] - along[segment] || 1;
-      const t = (distance - along[segment]) / span;
-      const x = vx[segment] + (vx[segment + 1] - vx[segment]) * t;
-      const y = vy[segment] + (vy[segment + 1] - vy[segment]) * t;
-      if (x < -8 || y < -8 || x > width + 8 || y > height + 8) {
-        continue;
+      if (this._settle(i, line, target - lengthPrefix[line])) {
+        if (load) {
+          load[line] += 1;
+        }
+        return;
       }
-
-      this._line[i] = line;
-      this._seg[i] = segment;
-      this._dist[i] = distance;
-      this._px[i] = x;
-      this._py[i] = y;
-      this._age[i] = 0;
-      this._life[i] = STREAM_MIN_LIFE + Math.floor(Math.random() * STREAM_LIFE_SPAN);
-      this._alive[i] = 1;
-      return;
     }
   },
 
@@ -1074,6 +1267,19 @@ const ChainParticles = L.Layer.extend({
       return;
     }
 
+    // What each chain is carrying as this frame starts, so the spawns below
+    // can top up the ones that are short.
+    const load = this._load;
+    const quota = this._quota;
+    if (load) {
+      load.fill(0);
+      for (let i = 0; i < this._alive.length; i += 1) {
+        if (this._alive[i]) {
+          load[this._line[i]] += 1;
+        }
+      }
+    }
+
     ctx.lineWidth = 1;
     ctx.lineCap = 'round';
 
@@ -1084,9 +1290,14 @@ const ChainParticles = L.Layer.extend({
     const height = canvas.height;
 
     // Segments gathered per colour class, then stroked class by class, so a
-    // trail carries its own chain's hue. Flat arrays of [x0, y0, x1, y1].
+    // trail carries its own chain's hue. Flat [x0, y0, x1, y1] runs.
     const palette = this._dark ? CHAIN_COLORS_DARK : CHAIN_COLORS;
-    const buckets = palette.map(() => []);
+    const segBuf = this._segBuf;
+    const segCount = this._segCount;
+    if (!segBuf) {
+      return;
+    }
+    segCount.fill(0);
 
     for (let i = 0; i < this._alive.length; i += 1) {
       if (!this._alive[i]) {
@@ -1101,6 +1312,7 @@ const ChainParticles = L.Layer.extend({
       }
 
       let line = this._line[i];
+      const from = line;
       // Guard against geometry swapped out from under a live particle.
       if (line >= geometry.lineCount) {
         this._spawn(i);
@@ -1131,9 +1343,25 @@ const ChainParticles = L.Layer.extend({
         line = next;
       }
       if (ended || segment >= last[line]) {
+        if (load) {
+          load[from] -= 1;
+        }
         this._spawn(i);
         continue;
       }
+
+      // Flowed on into another chain. If that one already carries its share,
+      // this runner does more good refilling a chain that carries none - which
+      // is what stops every runner ending up on the same few trunks.
+      if (line !== from && load) {
+        load[from] -= 1;
+        if (load[line] >= quota[line]) {
+          this._spawn(i);
+          continue;
+        }
+        load[line] += 1;
+      }
+
       this._line[i] = line;
       this._dist[i] = distance;
       this._seg[i] = segment;
@@ -1148,22 +1376,32 @@ const ChainParticles = L.Layer.extend({
         continue;
       }
 
-      buckets[shade[line]].push(this._px[i], this._py[i], x, y);
+      const colorClass = shade[line];
+      const buffer = segBuf[colorClass];
+      const at = segCount[colorClass] * 4;
+      if (at + 3 < buffer.length) {
+        buffer[at] = this._px[i];
+        buffer[at + 1] = this._py[i];
+        buffer[at + 2] = x;
+        buffer[at + 3] = y;
+        segCount[colorClass] += 1;
+      }
       this._px[i] = x;
       this._py[i] = y;
     }
 
-    for (let colorClass = 0; colorClass < buckets.length; colorClass += 1) {
-      const bucket = buckets[colorClass];
-      if (bucket.length === 0) {
+    for (let colorClass = 0; colorClass < segBuf.length; colorClass += 1) {
+      const drawn = segCount[colorClass];
+      if (drawn === 0) {
         continue;
       }
 
+      const buffer = segBuf[colorClass];
       ctx.strokeStyle = palette[colorClass];
       ctx.beginPath();
-      for (let k = 0; k < bucket.length; k += 4) {
-        ctx.moveTo(bucket[k], bucket[k + 1]);
-        ctx.lineTo(bucket[k + 2], bucket[k + 3]);
+      for (let k = 0; k < drawn * 4; k += 4) {
+        ctx.moveTo(buffer[k], buffer[k + 1]);
+        ctx.lineTo(buffer[k + 2], buffer[k + 3]);
       }
       ctx.stroke();
     }
@@ -1212,7 +1450,7 @@ const ChainParticles = L.Layer.extend({
     const { first, last, shade, lineCount } = geometry;
     const vx = this._vx;
     const vy = this._vy;
-    const inView = this._lineInView;
+    const inView = this._lineDrawn;
     const ratio = this._ratio;
     const period = DASH_PERIOD_PX * ratio;
     const dash = DASH_PX * ratio;

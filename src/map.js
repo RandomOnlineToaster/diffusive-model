@@ -17,7 +17,7 @@ import {
   populateFlowAccumulationLayer,
   populateFlowPathLayer
 } from './flow.js';
-import { createFlowParticleLayer } from './flowParticles.js';
+import { createFlowParticleLayer, setChainDetail } from './flowParticles.js';
 import {
   createPipeNetworkLayer,
   createRiverLayer,
@@ -604,6 +604,28 @@ export async function initializeMap() {
   labelLayerControl(geographyControl, 'Geography');
   labelLayerControl(simulationControl, 'Water Simulation');
   hintClassicToggle(simulationControl, [flowDirectionLayer, flowPathLayer, roadFlow.layer]);
+
+  // Flow detail: how much of the network Flow Paths and Street Flow draw, in
+  // both the smooth and the classic style. Full detail is every chain in
+  // view; lower keeps the longer ones, generalising the picture to the main
+  // channels the way a smaller-scale map would - and costing less to draw.
+  const detailInput = document.querySelector('#sim-detail');
+  const detailValue = document.querySelector('#sim-detail-value');
+  let detailFrame = 0;
+  function applyFlowDetail() {
+    detailValue.textContent = `${detailInput.value}%`;
+    // A drag fires far faster than the network can be re-picked, and only
+    // where it ends up matters.
+    if (detailFrame) {
+      return;
+    }
+    detailFrame = requestAnimationFrame(() => {
+      detailFrame = 0;
+      setChainDetail(Number(detailInput.value) / 100);
+    });
+  }
+  detailInput.addEventListener('input', applyFlowDetail);
+  applyFlowDetail();
   labelLayerControl(weatherControl, 'Weather');
 
   map.on('mousemove', (event) => {

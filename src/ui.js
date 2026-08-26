@@ -29,6 +29,17 @@ export function createAppLayout(root) {
             <output id="sim-speed-value">10x</output>
           </label>
 
+          <!-- How much of the flow network Flow Paths and Street Flow draw,
+               in both the smooth and the classic style. Wired in map.js: it
+               is a property of those layers rather than of the simulator,
+               but it belongs beside the other pace-and-scale controls. -->
+          <label class="field field--inline">
+            <span>Flow detail</span>
+            <input id="sim-detail" type="range" min="5" max="100" step="5" value="100"
+              title="How much of the flow network Flow Paths and Street Flow draw. Full detail draws every street; lower keeps the longer channels." />
+            <output id="sim-detail-value">100%</output>
+          </label>
+
           <!-- One editor card per storm, stacked; several can stay open at
                once so two storms can be tuned side by side. Built by
                rainfallSim.js as storms are added and removed. -->
