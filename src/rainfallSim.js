@@ -96,6 +96,10 @@ export function createRainfallSimulator({
   let running = false;
   let placing = false;
   let frameHandle = null;
+  // Set while another rain source - the forecast scrub - holds the grid. The
+  // storm loop stays paused for as long as it does, and the storm controls
+  // end it before they take the grid back.
+  let externalRain = null;
 
   // Cards, keyed by storm id, in the order the storms were added.
   const stormCards = new Map();
@@ -353,6 +357,14 @@ export function createRainfallSimulator({
   // Recompute the intensity field without advancing the clock or adding water,
   // so edits show live while the simulation is paused.
   function previewField() {
+    // With a forecast span holding the grid the storms are part of that
+    // scenario, so the span is re-rained with them rather than the storms
+    // being previewed on their own.
+    if (externalRain) {
+      externalRain.stormsChanged();
+      return;
+    }
+
     grid.step(stormSystem, 0, { noiseAmplitude: 0 });
     render();
   }
@@ -376,8 +388,17 @@ export function createRainfallSimulator({
   }
 
   function render() {
-    field.update(grid.intensity, 1);
+    // Under forecast rain the heatmap is the rain on screen; painting the
+    // same figures again here, resampled and on the storm colour scale, only
+    // muddied it.
+    // Under a forecast span the map already carries the forecast's own
+    // heatmap, so the simulator paints only what it adds to it: the storms.
+    field.update(externalRain ? grid.stormIntensity : grid.intensity, 1);
     handles.refresh();
+    if (externalRain) {
+      dom.play.textContent = externalRain.playing ? 'Pause' : 'Play';
+      dom.play.classList.toggle('sim-button--active', Boolean(externalRain.playing));
+    }
 
     const totals = grid.totals();
     dom.clock.textContent = formatClock(grid.elapsedSeconds);
@@ -413,7 +434,10 @@ export function createRainfallSimulator({
     const onStreets = getWaterOnMapM3?.() ?? 0;
 
     // Enough rain to expect a reading, and effectively none arriving.
-    const missing = streetCoverage && rained > 10000 && onStreets < rained * 0.02;
+    // Forecast rain covers the whole province, streets and all, so the
+    // ratio says nothing about where it is falling.
+    const missing =
+      !externalRain && streetCoverage && rained > 10000 && onStreets < rained * 0.02;
 
     dom.coverageNote.hidden = !missing;
     if (missing) {
@@ -469,14 +493,20 @@ export function createRainfallSimulator({
 
     handles.refresh();
     selectStorm(storm.id);
-    grid.step(stormSystem, 0, { noiseAmplitude: 0 });
-    render();
+    // Under a forecast span this hands the storm to the span, which re-rains
+    // it from here; otherwise it previews on the paused grid as before.
+    previewField();
     return storm;
   }
 
   // --- events ---------------------------------------------------------------
 
   dom.play.addEventListener('click', () => {
+    // With a forecast span holding the grid, Play runs or pauses the span.
+    if (externalRain) {
+      externalRain.togglePlay();
+      return;
+    }
     // Playing without a storm is allowed while water is still draining;
     // only a completely dry, stormless grid has nothing to simulate.
     if (stormSystem.storms.length === 0 && grid.totals().wetCells === 0) {
@@ -488,8 +518,20 @@ export function createRainfallSimulator({
   dom.add.addEventListener('click', () => setPlacing(!placing));
 
   dom.reset.addEventListener('click', () => {
-    setRunning(false);
     setPlacing(false);
+
+    // With a forecast span holding the grid, Reset is stop-and-rewind. The
+    // span and the storms placed on it are the scenario being watched, so
+    // they stay and the clock goes back to the span's first hour on dry
+    // ground; dropping the span is what a plain click off it does, and a
+    // storm goes by its own Remove button.
+    if (externalRain) {
+      onReset?.();
+      externalRain.rewind();
+      return;
+    }
+
+    setRunning(false);
     stormSystem.clear();
     grid.reset();
     selectedId = null;
@@ -599,6 +641,54 @@ export function createRainfallSimulator({
       return value >= 0.05 ? value : 0;
     },
 
-    stop: () => setRunning(false)
+    stop: () => setRunning(false),
+
+    /**
+     * The speed slider as a multiple of its default position, so anything
+     * else running on the simulation clock - the forecast playback - can be
+     * scaled by the same control. The two run in different units (storm
+     * seconds per real second against forecast hours per real second), and
+     * a ratio is the one thing they share.
+     */
+    get speedMultiplier() {
+      const value = Number(dom.speed.value);
+      const base = Number(dom.speed.defaultValue) || 10;
+      return value > 0 ? value / base : 1;
+    },
+
+    /** Repaint the readouts (and the field) from the grid as it stands. */
+    render,
+
+    /**
+     * Lend the grid to another source of rain - the forecast span - until it
+     * hands it back with null. The storm loop pauses, because the holder now
+     * keeps the clock, and the readouts follow whatever it puts through the
+     * grid. Storms carry on raining into that same water: they are part of
+     * the span's scenario, and every edit reaches it through previewField.
+     * Play toggles the holder's playback and Reset rewinds it.
+     */
+    setExternalRain(holder) {
+      if (holder) {
+        setRunning(false);
+        setPlacing(false);
+      }
+      externalRain = holder;
+      if (holder) {
+        render();
+        return;
+      }
+
+      // Puts the Play button back to the storm loop's state, and the field
+      // back to the storms on their own.
+      setRunning(false);
+      previewField();
+    },
+
+    /** Clear the water on the ground without touching the storms. */
+    clearWater() {
+      grid.reset();
+      onReset?.();
+      render();
+    }
   };
 }

@@ -6,6 +6,10 @@ export function createAppLayout(root) {
       </main>
 
       <aside class="analysis-panel">
+        <!-- One card, two halves: placed storms above the divider, the
+             forecast below. The controls at the top drive whichever is
+             running - a forecast span takes the grid over from the storms
+             while it plays. -->
         <section class="panel-card panel-card--sim">
           <div class="sim-header">
             <h2>Rainfall Simulator</h2>
@@ -21,7 +25,7 @@ export function createAppLayout(root) {
           <label class="field field--inline">
             <span>Speed</span>
             <input id="sim-speed" type="range" min="1" max="100" step="1" value="10"
-              title="Simulated seconds per real second" />
+              title="How fast simulated time runs: storm seconds per real second, and the forecast's playback in proportion" />
             <output id="sim-speed-value">10x</output>
           </label>
 
@@ -42,12 +46,13 @@ export function createAppLayout(root) {
           <div class="sim-legend"><span class="sim-legend-stops" id="sim-legend"></span><span class="sim-legend-unit">mm/h</span></div>
 
           <div class="sim-probe" id="sim-probe">Intensity 0.0 mm/h &middot; Surface 0.0 mm &middot; Total 0.0 mm</div>
-        </section>
 
-        <!-- Driven by weather.js while the Rain Forecast layer is on; the
-             time controls live here rather than over the map so they have
-             room for a separate day and hour. -->
-        <section class="panel-card panel-card--forecast" id="forecast-card">
+          <hr class="panel-divider" />
+
+          <!-- Driven by weather.js while a Rain Forecast layer is on; the time
+               controls live here rather than over the map so they have room
+               for a separate day and hour. The buttons and the speed slider
+               above the divider drive this half too. -->
           <div class="sim-header">
             <h2>Rain Forecast</h2>
             <span class="forecast-source" id="forecast-source">loading&hellip;</span>
@@ -60,10 +65,16 @@ export function createAppLayout(root) {
               role="slider" aria-label="Forecast time"
               aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"></div>
             <div class="timeline-head" id="forecast-head">
+              <!-- Shift + drag: a span between two red lines, tinted as far as
+                   it has played. -->
+              <i class="timeline-head-fill" id="forecast-head-fill"></i>
+              <i class="timeline-head-range" id="forecast-head-range"></i>
               <span class="timeline-head-label" id="forecast-head-label">--:--</span>
             </div>
             <span class="timeline-now" id="forecast-now" title="now" hidden></span>
           </div>
+
+          <p class="forecast-hint" id="forecast-hint" hidden></p>
 
           <div class="sim-readout">
             <div><span>At this hour</span><strong id="forecast-peak">0 mm/h</strong></div>

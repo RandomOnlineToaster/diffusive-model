@@ -200,6 +200,16 @@ function selectDrainageNetwork(flowAccumulation, percentile) {
   return sorted.slice(0, keepCount);
 }
 
+/**
+ * The accumulation a cell needs to make the drainage network: the value of
+ * the last cell the percentile cut keeps. Lets a rain-weighted view keep the
+ * uniform view's density while the rain shapes which cells make it.
+ */
+export function drainageCutoff(flowAccumulation, percentile) {
+  const network = selectDrainageNetwork(flowAccumulation, percentile);
+  return network.length > 0 ? network[network.length - 1].accumulationIndex : 0;
+}
+
 function scaleRadius(value, minValue, maxValue) {
   if (!(maxValue > minValue)) {
     return 4;

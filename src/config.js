@@ -124,13 +124,13 @@ export const config = {
   // Ground area one street junction represents, for mm <-> m3 conversion.
   streetPatchAreaM2: readNumber(env.VITE_STREET_PATCH_M2, 120, { min: 10, max: 2000 }),
 
-  // Rain-driven flow thresholds are ABSOLUTE amounts of water, not fractions:
-  // a share of the total would divide out as everything drains uniformly, and
-  // the network would never visibly dry. Grid channels need this many cubic
-  // metres of surface water passing through to be drawn...
+  // Under a placed storm the grid flow layers draw channels carrying at least
+  // this many cubic metres of surface water - an ABSOLUTE amount, not a
+  // fraction: a share of the total would divide out as everything drains
+  // uniformly, and the network would never visibly dry. Forecast rain is
+  // light and falls everywhere, so it keeps the uniform view's density
+  // (flowNetworkPercentile) instead.
   flowRainMinM3: readNumber(env.VITE_FLOW_RAIN_MIN_M3, 5000, { min: 1, max: 1e7 }),
-  // ...and street chains this much surface water, in mm summed over junctions.
-  roadFlowRainMin: readNumber(env.VITE_ROAD_FLOW_RAIN_MIN, 300, { min: 1, max: 1e6 }),
 
   // --- live weather layers ---
   // GSMaP is hourly and lands a few hours behind real time; asking for "now"
@@ -203,6 +203,16 @@ export const config = {
   // period, so the animation reads as a blinking dot rather than as flow
   // direction. 12 is the 3 km scale bar; the blinking sets in at 5 km.
   flowDashMinZoom: readNumber(env.VITE_FLOW_DASH_MIN_ZOOM, 12, { min: 0, max: 22 }),
+
+  // Shift + drag on the forecast timeline marks a span of the forecast that
+  // plays onto the map when released, at this many forecast hours per real
+  // second with the simulator's speed slider at its default 10x - a day in
+  // six seconds. The slider scales it from there, and more steeply than one
+  // for one, so its slow end is slow enough to watch a band cross the map.
+  forecastPlayHoursPerSecond: readNumber(env.VITE_FORECAST_PLAY_HOURS_PER_S, 4, {
+    min: 0.25,
+    max: 48
+  }),
 
   // Flow arrows are markers, so the analysis grid gets thinned down to roughly
   // this many before drawing.

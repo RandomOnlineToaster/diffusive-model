@@ -13,6 +13,7 @@ import {
   createFlowAccumulationLayer,
   createFlowDirectionLayer,
   createFlowPathLayer,
+  drainageCutoff,
   populateFlowAccumulationLayer,
   populateFlowPathLayer
 } from './flow.js';
@@ -39,9 +40,20 @@ import {
   createRainForecastLayers,
   createRainGaugeLayer
 } from './weather.js';
+import { createForecastRainDriver } from './forecastRain.js';
 import { config } from './config.js';
 
 const chonburiBoundary = JSON.parse(chonburiBoundaryRaw);
+
+// How the simulator's speed slider bends the forecast's playback rate. The
+// two halves of the card run in different units - storm seconds per real
+// second against forecast hours per real second - so the slider is read as a
+// ratio to its own default, and 1.5 rather than 1 because a straight ratio
+// left the slow end at 0.4 forecast hours a second: a day in a minute, still
+// too quick to follow a band across the province. The exponent stretches the
+// bottom of the range and leaves 10x, where the configured rate stands
+// exactly, untouched.
+const FORECAST_SPEED_CURVE = 1.5;
 
 export async function initializeMap() {
   const map = L.map('map', {
@@ -265,6 +277,8 @@ export async function initializeMap() {
   let streetRenderDelay = STREET_RENDER_MS;
   // Declared here for the same reason: the tick handler below refreshes it.
   let samplePoint = null;
+  // Shift + drag on the forecast bar; built once the simulator exists.
+  let forecastRain = null;
 
   // Storms are placed over the DEM extent, so the simulator shares its bounds.
   const rainfall = createRainfallSimulator({
@@ -276,8 +290,14 @@ export async function initializeMap() {
 
     // Live total for the "Water on map" tile: what is standing on the street
     // network right now, which falls as it drains - unlike the cumulative
-    // rain volume beside it.
-    getWaterOnMapM3: () => (roadFlow.dynamic ? roadFlow.dynamic.totals().storedM3 : 0),
+    // rain volume beside it. Under forecast rain the streets are routed, not
+    // ponded, so the tile reads the water on the ground instead.
+    getWaterOnMapM3: () =>
+      forecastRain?.active
+        ? rainfall.grid.surfaceVolumeM3()
+        : roadFlow.dynamic
+          ? roadFlow.dynamic.totals().storedM3
+          : 0,
 
     // Where street water can exist at all, measured from the graph itself
     // rather than assumed from the build-time bbox.
@@ -402,8 +422,13 @@ export async function initializeMap() {
     const weighted = calculateFlowAccumulation(flowDirection, weights);
     const visibleWeighted = weighted.filter(isInsideAnalysis);
     // The threshold is water volume; accumulation carries mm summed over
-    // cells, so convert: mm x m2 / 1000 = m3.
-    const minUpstream = (config.flowRainMinM3 * 1000) / cellAreaM2;
+    // cells, so convert: mm x m2 / 1000 = m3. Forecast rain is light and
+    // falls everywhere, so a cut tuned for a cloudburst left nothing drawn:
+    // it keeps the uniform view's share of cells instead, floored at a cubic
+    // metre so bone-dry ground stays blank, and the rain shapes the network.
+    const minUpstream = forecastRain?.active
+      ? Math.max(1000 / cellAreaM2, drainageCutoff(visibleWeighted, config.flowNetworkPercentile))
+      : (config.flowRainMinM3 * 1000) / cellAreaM2;
 
     if (wantsPaths) {
       populateFlowPathLayer(flowPathLayer, visibleFlowDirection, visibleWeighted, {
@@ -424,7 +449,8 @@ export async function initializeMap() {
   }
 
   function scheduleRainFlowRefresh() {
-    if (!rainLayerActive || rainRefreshTimer) {
+    // Forecast rain refreshes the flow layers on its own cadence.
+    if (!rainLayerActive || rainRefreshTimer || forecastRain?.active) {
       return;
     }
 
@@ -435,6 +461,52 @@ export async function initializeMap() {
       applyFlowWeighting();
     }, wait);
   }
+
+  // --- forecast rain: Shift + drag on the forecast timeline -----------------
+  //
+  // The forecast card marks a span; the driver rains the active forecast
+  // onto the simulator's grid through it, and the three flow layers follow
+  // the surface water the way they follow a storm's.
+  //
+  // Street Flow under forecast rain is that water routed along the streets,
+  // the way Flow Paths are re-weighted - not the ponding model, which drains
+  // anything short of a cloudburst before it can move and so showed nothing
+  // for a real forecast.
+  function refreshForecastStreets() {
+    if (!roadFlow.refresh || !map.hasLayer(roadFlow.layer)) {
+      return;
+    }
+
+    if (forecastRain?.active) {
+      roadFlow.refresh((lat, lng) => rainfall.depthAt(lat, lng));
+    } else if (rainLayerActive) {
+      roadFlow.dynamic?.render();
+    } else {
+      roadFlow.refresh(null);
+    }
+  }
+
+  forecastRain = createForecastRainDriver({
+    rainfall,
+    // The simulator's speed slider paces this the way it paces the storm
+    // clock, so one control drives both halves of the card.
+    playHoursPerSecond: () =>
+      config.forecastPlayHoursPerSecond * rainfall.speedMultiplier ** FORECAST_SPEED_CURVE,
+    refreshLayers: () => {
+      applyFlowWeighting();
+      refreshForecastStreets();
+      refreshSamplePopup();
+    },
+    onState: (state) => forecast.card.setSeries(state)
+  });
+  forecast.card.setSeriesHandler({
+    canStart: () => map.hasLayer(rainfall.layer),
+    begin: ({ grid, fromMs }) => forecastRain.begin({ forecastGrid: grid, fromMs }),
+    setEnd: (ms) => forecastRain.setEnd(ms),
+    play: () => forecastRain.play(),
+    showAt: (ms) => forecastRain.showAt(ms),
+    end: () => forecastRain.end()
+  });
 
   map.on('overlayadd', (event) => {
     // Shift on the tick chooses the classic rendering for that layer.
@@ -456,6 +528,7 @@ export async function initializeMap() {
       rainLayerActive = true;
       applyFlowWeighting();
       roadFlow.dynamic?.render();
+      forecast.card.refreshHint();
     } else if (
       rainLayerActive &&
       (event.layer === flowPathLayer || event.layer === flowAccumulationLayer)
@@ -470,17 +543,15 @@ export async function initializeMap() {
       });
     } else if (event.layer === roadFlow.layer) {
       // Rebuild in the just-chosen style; in rain mode with live water.
-      if (rainLayerActive) {
-        roadFlow.dynamic?.render();
-      } else {
-        roadFlow.refresh(null);
-      }
+      refreshForecastStreets();
     }
   });
 
   map.on('overlayremove', (event) => {
     if (event.layer === rainfall.layer) {
       rainLayerActive = false;
+      // A forecast span cannot outlive the grid it rains onto.
+      forecastRain.end();
       if (rainRefreshTimer) {
         clearTimeout(rainRefreshTimer);
         rainRefreshTimer = null;
@@ -490,6 +561,7 @@ export async function initializeMap() {
         streetRenderTimer = null;
       }
       applyFlowWeighting();
+      forecast.card.refreshHint();
     }
   });
 
@@ -575,7 +647,9 @@ export async function initializeMap() {
     lines.push(`Rain here: ${intensity.toFixed(1)} mm/h`);
     lines.push(`Water on ground: ${surfaceMm.toFixed(1)} mm`);
 
-    const street = roadFlow.dynamic?.depthNear(lat, lng, 60);
+    // Forecast rain is routed along the streets, not ponded, so there is no
+    // standing depth to read.
+    const street = forecastRain?.active ? null : roadFlow.dynamic?.depthNear(lat, lng, 60);
     if (street) {
       const here = Math.round(street.distanceM) <= 20 ? '' : ` (${Math.round(street.distanceM)} m away)`;
       lines.push(
@@ -595,6 +669,8 @@ export async function initializeMap() {
       if (street.flowM3s > 0.05) {
         lines.push(`Street flow: ~${street.flowM3s.toFixed(1)} m³/s`);
       }
+    } else if (forecastRain?.active) {
+      lines.push('Street water: forecast rain runs along the streets (see Street Flow)');
     } else {
       lines.push('Street water: none within 60 m');
     }

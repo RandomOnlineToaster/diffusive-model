@@ -51,6 +51,12 @@ export function createRainfallGrid({ bounds, columns = 240, rows = 240, drainTau
 
   const cellCount = columns * rows;
   const intensity = new Float32Array(cellCount);
+  // The storm part of the field on its own, kept only while the intensity is
+  // storms laid over a base field - a forecast span holding the grid. It is
+  // what lets the simulator draw its storms over the forecast's own heatmap
+  // instead of painting the forecast's rain a second time. With no base the
+  // storms are the whole field, and this is left as it was.
+  const stormRain = new Float32Array(cellCount);
   const accumulation = new Float32Array(cellCount);
   // Water currently sitting on the surface: rain adds to it, drainage and
   // infiltration take it away as exp(-dt / drainTauSeconds). The flow layers
@@ -76,6 +82,7 @@ export function createRainfallGrid({ bounds, columns = 240, rows = 240, drainTau
     cellHeightMeters,
     cellAreaM2,
     intensity,
+    stormIntensity: stormRain,
     accumulation,
     surface,
 
@@ -129,18 +136,20 @@ export function createRainfallGrid({ bounds, columns = 240, rows = 240, drainTau
     },
 
     /**
-     * One timestep. Intensity is rebuilt each step, then converted to a depth:
-     *
-     *   rainDepthMm = intensityMmPerHour * dt / 3600
+     * Rebuild the intensity field from a list of storms, optionally on top of
+     * a base field - the forecast's rain, while a forecast span holds the
+     * grid, so a placed storm rains into the same water the forecast does.
      *
      * Only cells inside a storm's rain radius are visited, so cost scales with
      * storm area rather than grid size.
      */
-    step(stormSystem, dtSeconds, { noiseAmplitude = 0 } = {}) {
-      intensity.fill(0);
-      elapsedSeconds += dtSeconds;
+    compose(storms, { noiseAmplitude = 0, base = null } = {}) {
+      // With a base the storms are built apart and summed onto it; without
+      // one they are the field itself, and are built straight into it.
+      const target = base ? stormRain : intensity;
+      target.fill(0);
 
-      for (const storm of stormSystem.storms) {
+      for (const storm of storms) {
         const radius = storm.rainRadiusMeters;
         const firstColumn = Math.max(0, columnFromX(storm.x - radius));
         const lastColumn = Math.min(columns - 1, columnFromX(storm.x + radius));
@@ -155,37 +164,73 @@ export function createRainfallGrid({ bounds, columns = 240, rows = 240, drainTau
           for (let column = firstColumn; column <= lastColumn; column += 1) {
             const value = stormIntensityAt(storm, cellX[column], y);
             if (value > 0) {
-              intensity[rowOffset + column] += value;
+              target[rowOffset + column] += value;
             }
           }
         }
       }
 
       // Optional spatial variation, applied after the Gaussian so the Gaussian
-      // stays dominant. Smooth over ~1 km rather than per-cell random, which
-      // would just look like static.
+      // stays dominant, and to the storms alone - a published forecast is not
+      // ours to add texture to. Smooth over ~1 km rather than per-cell random,
+      // which would just look like static.
       if (noiseAmplitude > 0) {
-        applyNoise(intensity, columns, rows, elapsedSeconds, noiseAmplitude);
+        applyNoise(target, columns, rows, elapsedSeconds, noiseAmplitude);
       }
 
+      if (base) {
+        for (let index = 0; index < cellCount; index += 1) {
+          intensity[index] = target[index] + base[index];
+        }
+      }
+    },
+
+    /**
+     * One timestep of storm rain: rebuild the field, then integrate it. Two
+     * calls rather than one so a forecast span can rebuild the field at each
+     * of its own slices and integrate on its own clock.
+     */
+    step(stormSystem, dtSeconds, options = {}) {
+      this.compose(stormSystem.storms, options);
+      this.integrate(dtSeconds);
+    },
+
+    /**
+     * One timestep with the intensity field as it stands, held constant.
+     *
+     * step() rebuilds intensity from the storms; this takes whatever the
+     * caller has put in `intensity` - a forecast hour resampled onto the
+     * grid - and rains it for dt. At a steady rate the surface-water
+     * equation ds/dt = I/3600 - s/tau has a closed form, so one call over a
+     * whole forecast hour lands on the same water as sixty one-minute steps.
+     */
+    integrate(dtSeconds) {
+      if (!(dtSeconds > 0)) {
+        return;
+      }
+
+      elapsedSeconds += dtSeconds;
+      const hours = dtSeconds / 3600;
+      const decay = Math.exp(-dtSeconds / drainTauSeconds);
+      // Surface water left at the end of dt from rain at 1 mm/h throughout.
+      const gain = (drainTauSeconds / 3600) * (1 - decay);
       let stepTotal = 0;
       let stepPeak = 0;
-      const hoursThisStep = dtSeconds / 3600;
-      const drainFactor = Math.exp(-dtSeconds / drainTauSeconds);
 
       for (let index = 0; index < cellCount; index += 1) {
-        const depth = intensity[index] * hoursThisStep;
-        if (depth > 0) {
+        const rate = intensity[index];
+        let remaining = surface[index] * decay;
+
+        if (rate > 0) {
+          const depth = rate * hours;
           accumulation[index] += depth;
           stepTotal += depth;
           if (depth > stepPeak) {
             stepPeak = depth;
           }
+          remaining += rate * gain;
         }
 
-        const remaining = surface[index] * drainFactor + depth;
-        // Exponential decay never quite reaches zero; snap the residue so a
-        // drained cell reads as dry rather than damp forever.
         surface[index] = remaining > 0.02 ? remaining : 0;
       }
 
@@ -196,6 +241,15 @@ export function createRainfallGrid({ bounds, columns = 240, rows = 240, drainTau
     /** Water added over the whole grid this step, in cubic metres. */
     stepVolumeM3() {
       return (lastStepDepthMm / 1000) * cellAreaM2;
+    },
+
+    /** Water standing on the ground across the grid right now, in cubic metres. */
+    surfaceVolumeM3() {
+      let total = 0;
+      for (let index = 0; index < cellCount; index += 1) {
+        total += surface[index];
+      }
+      return (total / 1000) * cellAreaM2;
     },
 
     totals() {

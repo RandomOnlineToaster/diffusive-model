@@ -16,7 +16,8 @@ storms and routes the resulting water across terrain and streets.
   draw wind - coloured green to red by how much water they carry.
 - **Weather** — live satellite cloud cover from
   [JAXA GSMaP](https://sharaku.eorc.jaxa.jp/GSMaP/), a gridded rainfall
-  forecast with an hourly slider, and measured rainfall from the
+  forecast with an hourly slider (Shift + drag rains it onto the simulator,
+  hour by hour), and measured rainfall from the
   [Thai Meteorological Department](https://data.tmd.go.th/)'s own rain
   gauges — 127 stations nationwide, 14 of them inside the study area.
 - **Infrastructure layers** — rivers, water bodies, water gates, drainage
@@ -95,6 +96,34 @@ points, and only the token-gated `nwpapi` gives *millimetres on a grid*.
 
 The rain forecast layer draws a **grid** of cells with an hour-by-hour slider,
 from whichever provider is available:
+
+### Raining the forecast onto the map
+
+With the **Rainfall Simulator** layer and a rain-forecast layer both on,
+**Shift + drag** on the forecast bar marks a span of the forecast between two
+red lines; release, and the span plays onto the map - a day in about six
+seconds at the default speed - with the tinted part of the bar showing how far
+it has got. Each
+forecast hour is taken as a steady rate over that hour (the data comes as
+"so many mm between T and T + 1 h"); the grid's surface water integrates it
+exactly, and Flow Paths, Flow Accumulation and Street Flow are re-weighted by
+that water as it goes (Street Flow routes the runoff along the streets rather
+than ponding it, so light rain still shows where it runs). Click or drag
+inside the span to look at any moment of it, and Shift + drag to move its end,
+forwards or back. The simulation controls above the divider drive the span as
+well: **Play** pauses, resumes or replays it, **Reset** takes it back to its
+first hour on dry ground, and the **speed** slider scales how fast it plays.
+
+Storms rain into the same water: place one while a span is up and it joins the
+scenario, raining from the moment it was placed and drifting on the span's
+clock, so "a cell parks over Pattaya during this front" is one map rather than
+two. Edit or move a storm and the span is re-rained with it; move it or turn
+it part-way through and the track it has already laid stands, so a cell can sit
+over a district for six hours and then drift off. Reset rewinds that whole
+scenario rather than clearing it - a storm goes by its own Remove button, and
+Reset only clears storms when there is no span to rewind. The simulator
+paints only the storms while a span is up, since the forecast's own heatmap is
+already on the map. A plain click outside the span clears it.
 
 | Provider | Resolution | Horizon | Needs |
 | --- | --- | --- | --- |

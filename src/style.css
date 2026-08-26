@@ -405,6 +405,16 @@ select {
   gap: 10px;
 }
 
+/* The line between the card's two halves: placed storms above, the forecast
+   below. Both are driven by the same clock and the same controls, which is
+   why they share a card rather than sitting in two. */
+.panel-divider {
+  width: 100%;
+  margin: 3px 0 1px;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
 .sim-header {
   display: flex;
   align-items: baseline;
@@ -794,16 +804,7 @@ select {
   filter: invert(1) blur(var(--wx-blur, 3px));
 }
 
-/* Forecast card in the analysis panel. */
-
-.panel-card--forecast {
-  display: grid;
-  gap: 10px;
-}
-
-.panel-card--forecast[hidden] {
-  display: none;
-}
+/* The forecast half of the simulation card. */
 
 .forecast-source {
   font-size: 0.68rem;
@@ -811,15 +812,6 @@ select {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-muted);
-}
-
-.panel-card--forecast select {
-  padding: 6px 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text);
-  font-size: 0.78rem;
 }
 
 /* Forecast timeline: one scrub bar across the whole run, day cells for
@@ -834,19 +826,17 @@ select {
   user-select: none;
 }
 
-/* The bar itself is a groove: a hairline border, a soft inset, and the hours
-   already behind the cursor shaded, so it reads as a track being scrubbed
-   rather than a row of buttons. */
+/* The bar itself is a groove: a hairline border and a soft inset, so it reads
+   as a track being scrubbed rather than a row of buttons. One flat surface
+   across its whole length - shading the hours behind the cursor made the two
+   halves of the same bar different colours, which read as a rendering fault
+   rather than as progress. */
 .timeline-track {
   display: flex;
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: 9px;
-  background: linear-gradient(
-    to right,
-    var(--surface-muted) 0 var(--x),
-    var(--surface) var(--x)
-  );
+  background: var(--surface);
   box-shadow: inset 0 1px 2px rgba(20, 24, 31, 0.05);
   cursor: pointer;
   transition:
@@ -969,7 +959,14 @@ select {
   top: 0;
   left: 50%;
   transform: translate(-50%, -100%);
-  padding: 3px 10px 4px;
+  /* A fixed height, so the two-line form below fits in the same box. */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 24px;
+  padding: 0 10px;
   border: 1.5px solid var(--text);
   border-radius: 7px;
   background: var(--surface);
@@ -979,6 +976,19 @@ select {
   line-height: 1.25;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* The span's two ends on two lines, smaller, when one line would need a box
+   far wider than the span beneath it. Same height as the one-line box. */
+.timeline-head-label--stacked {
+  padding: 0 8px;
+  font-size: 0.56rem;
+  line-height: 1.15;
+  letter-spacing: 0.01em;
+}
+
+.timeline-head-label--stacked span {
+  display: block;
 }
 
 /* At the ends of the bar the box is pinned to the cursor's edge: that side's
@@ -1000,6 +1010,53 @@ select {
   border-bottom-right-radius: 0;
 }
 
+/* Shift + drag: the playhead becomes a span of the forecast. The cursor
+   stretches over it, red lines mark its two ends, and the tint runs from the
+   start to the moment on the map - growing as the span plays, or sitting at
+   whichever moment inside it was clicked. */
+.timeline--series .timeline-head {
+  /* Position and width are set per frame, in pixels. */
+  margin-left: 0;
+}
+
+.timeline--series .timeline-head::after {
+  background: none;
+}
+
+.timeline-head-range {
+  display: none;
+  position: absolute;
+  /* Offsets are from the cursor's padding box, 1.5 px inside its border:
+     the top line of the tint meets the inner outline, and the left red line
+     is centred on the hairline's old position, 12 px in. */
+  top: 4.5px;
+  bottom: 4.5px;
+  left: 9.5px;
+  width: 2px;
+  background: linear-gradient(
+    to right,
+    #ef4444 0 2px,
+    transparent 2px calc(100% - 2px),
+    #ef4444 calc(100% - 2px)
+  );
+}
+
+.timeline-head-fill {
+  display: none;
+  position: absolute;
+  top: 4.5px;
+  bottom: 4.5px;
+  /* From the centre of the left red line. */
+  left: 10.5px;
+  width: 0;
+  background: rgba(239, 68, 68, 0.26);
+}
+
+.timeline--series .timeline-head-range,
+.timeline--series .timeline-head-fill {
+  display: block;
+}
+
 /* The present hour, so the playhead's position reads as past or future. */
 .timeline-now {
   position: absolute;
@@ -1013,6 +1070,19 @@ select {
 }
 
 .timeline-now[hidden] {
+  display: none;
+}
+
+/* Under the bar: how to rain the forecast onto the map, or what is going on
+   while it rains. */
+.forecast-hint {
+  margin: -6px 0 0;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  line-height: 1.35;
+}
+
+.forecast-hint[hidden] {
   display: none;
 }
 

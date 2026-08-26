@@ -248,6 +248,9 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     }
 
     return {
+      /** Each junction's catchment multiplier on the rain landing on it. */
+      runoffFactor,
+
       reset() {
         volM3.fill(0);
         depthCache.fill(0);
@@ -589,6 +592,7 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
   }
 
   showUniform();
+  const dynamic = createDynamicWater();
 
   return {
     layer: group,
@@ -603,7 +607,7 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
       lines: lineCount
     },
 
-    dynamic: createDynamicWater(),
+    dynamic,
 
     // Raw graph coordinates, so the pipe model can map inlets onto junctions.
     graph: { nodeCount, lat, lng },
@@ -617,10 +621,12 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     /**
      * Switch between uniform terrain flow and rainfall-driven flow.
      *
-     * depthAt(lat, lng) returns accumulated rain in mm, or null to restore the
-     * uniform view. Junction weights are normalised so the average wet junction
-     * is 1, keeping the colour classes on a comparable scale; junctions with no
-     * rain contribute nothing, so dry streets vanish from the network.
+     * depthAt(lat, lng) returns surface water on the ground in mm, or null
+     * to restore the uniform view. Each junction collects that depth over
+     * its catchment strip - the same multiplier the ponding model uses - and
+     * the water is routed downhill along the streets, so a chain's value is
+     * the runoff arriving from upstream right now. Junctions with no rain
+     * contribute nothing, so dry districts drop out of the network.
      */
     refresh(depthAt) {
       if (!depthAt) {
@@ -629,12 +635,15 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
       }
 
       const weights = new Float64Array(nodeCount);
+      const factor = dynamic.runoffFactor;
       let wetCount = 0;
+      let weightSum = 0;
 
       for (let n = 0; n < nodeCount; n += 1) {
         const depth = depthAt(lat[n], lng[n]);
         if (depth > 0) {
-          weights[n] = depth;
+          weights[n] = depth * factor[n];
+          weightSum += weights[n];
           wetCount += 1;
         }
       }
@@ -646,12 +655,26 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
         return;
       }
 
-      // Absolute surface water (mm summed over junctions), against an absolute
-      // threshold: streets drop out one by one as their catchments drain, which
-      // is the dry-out the display exists to show.
+      // mm on the street patch, summed over the junctions upstream. Forecast
+      // rain is light and falls everywhere, so an absolute cut tuned for a
+      // cloudburst left nothing drawn: the cut keeps the uniform view's
+      // density instead - a chain shows once it gathers the baseline's count
+      // of average wet junctions - and the colour carries the amount, on a
+      // fixed scale of runoff volume, a decade per class from one cubic metre.
       const weighted = accumulateFlow(nodeCount, downstream, weights);
-      rebuild(weighted, config.roadFlowRainMin, (value) =>
-        `Street flow (storm rain)<br>Surface-water index ${Math.round(value).toLocaleString()}`
+      const patchM2 = config.streetPatchAreaM2;
+      const m3Of = (value) => (value * patchM2) / 1000;
+      const classOf = (value) =>
+        Math.max(
+          0,
+          Math.min(ACCUMULATION_COLORS.length - 1, Math.floor(Math.log10(Math.max(1, m3Of(value)))))
+        );
+      rebuild(
+        weighted,
+        (weightSum / wetCount) * threshold,
+        (value) =>
+          `Street flow (forecast rain)<br>~${Math.round(m3Of(value)).toLocaleString()} m\u00b3 of runoff from upstream`,
+        classOf
       );
     }
   };

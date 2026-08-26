@@ -239,7 +239,10 @@ function createForecastCard({ boundary }) {
     track: document.querySelector('#forecast-track'),
     head: document.querySelector('#forecast-head'),
     headLabel: document.querySelector('#forecast-head-label'),
+    range: document.querySelector('#forecast-head-range'),
+    fill: document.querySelector('#forecast-head-fill'),
     now: document.querySelector('#forecast-now'),
+    hint: document.querySelector('#forecast-hint'),
     peak: document.querySelector('#forecast-peak'),
     total: document.querySelector('#forecast-total'),
     gradient: document.querySelector('#forecast-gradient'),
@@ -262,10 +265,46 @@ function createForecastCard({ boundary }) {
   let provinceOutlook = null;
   let attachedMap = null;
   let swapToken = 0;
+  // Shift + drag marks a span of the forecast that plays onto the map when
+  // released; a plain click or drag inside it shows any moment of it. The
+  // driver (map.js) does the simulating; the card turns pointer positions
+  // into times and draws the span and how far it has played.
+  let seriesHandler = null;
+  let series = null;
+  let stampsMs = [];
+  let hintTimer = 0;
+  // The cursor reaches this far beyond the red lines, as the single cursor
+  // does about its hairline; the time box reaches this far beyond the cursor.
+  const HEAD_PAD_PX = 12;
+  const LABEL_MARGIN_PX = 10;
 
   const active = () => (activeKey ? sources.get(activeKey)?.state : null);
   const fractionOf = (index) => (stepCount <= 1 ? 0 : index / (stepCount - 1));
   const dayOfStep = (index) => days.find((day) => day.steps.includes(index)) || days[0];
+
+  // The bar as a clock: its ends are the first and last stamps, and the
+  // steps sit where the stepped view puts them.
+  const spanStartMs = () => stampsMs[0] ?? 0;
+  const spanEndMs = () => stampsMs[stampsMs.length - 1] ?? 0;
+  const stepMs = () => (stampsMs.length > 1 ? stampsMs[1] - stampsMs[0] : 3600 * 1000);
+  const fractionOfMs = (ms) => {
+    const start = spanStartMs();
+    const end = spanEndMs();
+    return end > start ? Math.max(0, Math.min(1, (ms - start) / (end - start))) : 0;
+  };
+  const msAtClient = (clientX) => {
+    const rect = dom.track.getBoundingClientRect();
+    const fraction = rect.width > 0 ? Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) : 0;
+    return spanStartMs() + fraction * (spanEndMs() - spanStartMs());
+  };
+  /** The hour bucket a moment falls in: the last stamp at or before it. */
+  const bucketOfMs = (ms) => {
+    let bucket = 0;
+    for (let index = 1; index < stampsMs.length && stampsMs[index] <= ms; index += 1) {
+      bucket = index;
+    }
+    return bucket;
+  };
 
   // --- chance-of-rain chip ---------------------------------------------------
   const chip = boundary
@@ -347,25 +386,22 @@ function createForecastCard({ boundary }) {
     dom.head.classList.toggle('timeline-head--flush-right', Math.abs(placed.right - head.right) < 1.5);
   }
 
-  function setStep(index) {
+  /** Put one forecast hour on the map and in the readouts. */
+  function showBucket(index) {
     const state = active();
     if (!state?.grid) {
-      return;
+      return false;
     }
 
     current = Math.max(0, Math.min(stepCount - 1, index));
-    lookingAt = Date.parse(state.grid.times[current]) || lookingAt;
+    lookingAt = stampsMs[current] || lookingAt;
 
     const { peak } = state.heat.showStep(current);
     const day = dayOfStep(current);
 
     dom.peak.textContent = `${peak.toFixed(1)} mm/h`;
     dom.total.textContent = `${wettestDailyTotal(state.grid, day.steps).toFixed(1)} mm`;
-    dom.timeline.style.setProperty('--x', `${(fractionOf(current) * 100).toFixed(3)}%`);
-    dom.headLabel.textContent = `${day.short} ${String(state.grid.times[current]).slice(11, 16)}`;
     dom.track.setAttribute('aria-valuenow', String(current));
-    dom.track.setAttribute('aria-valuetext', dom.headLabel.textContent);
-    clampLabel();
 
     const outlook = outlookFor(day.date);
     chipHtml = outlook
@@ -373,6 +409,183 @@ function createForecastCard({ boundary }) {
         `<strong>${outlook.rainChance}%</strong> chance of rain</span>`
       : '';
     updateChip();
+    return true;
+  }
+
+  /** The single cursor, on the hour being shown. */
+  function placeStepHead() {
+    const state = active();
+    const day = dayOfStep(current);
+    dom.timeline.style.setProperty('--x', `${(fractionOf(current) * 100).toFixed(3)}%`);
+    dom.headLabel.classList.remove('timeline-head-label--stacked');
+    dom.headLabel.style.width = '';
+    dom.headLabel.textContent = `${day.short} ${String(state.grid.times[current]).slice(11, 16)}`;
+    dom.track.setAttribute('aria-valuetext', dom.headLabel.textContent);
+    clampLabel();
+  }
+
+  function setStep(index) {
+    if (!showBucket(index)) {
+      return;
+    }
+
+    if (series) {
+      placeSeriesHead();
+    } else {
+      placeStepHead();
+    }
+  }
+
+  // --- Shift + drag: raining the forecast onto the map ----------------------
+
+  const pad2 = (value) => String(value).padStart(2, '0');
+  const clockOf = (ms) => {
+    const date = new Date(ms);
+    return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+  };
+
+  function dayShortOf(ms) {
+    const date = new Date(ms);
+    const key = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+    const day = days.find((entry) => entry.date === key);
+    return day
+      ? day.short
+      : date.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' });
+  }
+
+  /**
+   * "Mon 25 14:00 – Tue 26 03:30" for the span, the day named once when both
+   * ends share it; as two lines when asked, for a narrow box.
+   */
+  function spanLabel(fromMs, toMs, stacked) {
+    const from = `${dayShortOf(fromMs)} ${clockOf(fromMs)}`;
+    if (toMs - fromMs < 30 * 1000) {
+      return stacked ? [dayShortOf(fromMs), clockOf(fromMs)] : from;
+    }
+
+    const sameDay = new Date(fromMs).toDateString() === new Date(toMs).toDateString();
+    const to = sameDay ? clockOf(toMs) : `${dayShortOf(toMs)} ${clockOf(toMs)}`;
+    if (!stacked) {
+      return `${from} \u2013 ${to}`;
+    }
+
+    return sameDay
+      ? [dayShortOf(fromMs), `${clockOf(fromMs)} \u2013 ${clockOf(toMs)}`]
+      : [`${from} \u2013`, to];
+  }
+
+  function lineOf(text) {
+    const span = document.createElement('span');
+    span.textContent = text;
+    return span;
+  }
+
+  /**
+   * The span cursor: red lines at the span's two ends, the tint from the
+   * start to the moment on the map. The time box sits over it, at least as
+   * wide as it, one line when that box has room for the two times and two
+   * smaller lines otherwise.
+   */
+  function placeSeriesHead() {
+    const width = dom.track.getBoundingClientRect().width;
+    if (!(width > 0)) {
+      return;
+    }
+
+    const px = (ms) => Math.max(HEAD_PAD_PX, Math.min(width - HEAD_PAD_PX, fractionOfMs(ms) * width));
+    const x0 = px(series.fromMs);
+    const x1 = Math.max(x0, px(series.endMs));
+    const xs = Math.min(x1, Math.max(x0, px(series.shownMs)));
+    const headWidth = x1 - x0 + 2 * HEAD_PAD_PX;
+
+    dom.head.style.left = `${(x0 - HEAD_PAD_PX).toFixed(2)}px`;
+    dom.head.style.width = `${headWidth.toFixed(2)}px`;
+    // Two 2 px lines centred on x0 and x1; the tint from x0 to xs.
+    dom.range.style.width = `${(x1 - x0 + 2).toFixed(2)}px`;
+    dom.fill.style.width = `${(xs - x0).toFixed(2)}px`;
+    dom.timeline.style.setProperty('--x', `${((xs / width) * 100).toFixed(3)}%`);
+
+    const room = headWidth + 2 * LABEL_MARGIN_PX;
+    dom.headLabel.classList.remove('timeline-head-label--stacked');
+    dom.headLabel.style.width = '';
+    dom.headLabel.textContent = spanLabel(series.fromMs, series.shownMs, false);
+    let natural = dom.headLabel.getBoundingClientRect().width;
+    if (natural > room) {
+      const [top, bottom] = spanLabel(series.fromMs, series.shownMs, true);
+      dom.headLabel.replaceChildren(lineOf(top), lineOf(bottom));
+      dom.headLabel.classList.add('timeline-head-label--stacked');
+      natural = dom.headLabel.getBoundingClientRect().width;
+    }
+    dom.headLabel.style.width = `${Math.min(width, Math.max(room, natural)).toFixed(2)}px`;
+    dom.track.setAttribute('aria-valuetext', spanLabel(series.fromMs, series.shownMs, false));
+    clampLabel();
+  }
+
+  /** Whether a pointer position lies on the span (a few pixels' grace). */
+  function onSpan(clientX) {
+    if (!series) {
+      return false;
+    }
+
+    const rect = dom.track.getBoundingClientRect();
+    const x = clientX - rect.left;
+    return x >= fractionOfMs(series.fromMs) * rect.width - 4 && x <= fractionOfMs(series.endMs) * rect.width + 4;
+  }
+
+  function exitSeries() {
+    series = null;
+    dom.timeline.classList.remove('timeline--series');
+    dom.head.style.left = '';
+    dom.head.style.width = '';
+    dom.range.style.width = '';
+    dom.fill.style.width = '';
+    dom.headLabel.classList.remove('timeline-head-label--stacked');
+    dom.headLabel.style.width = '';
+    if (active()?.grid && stepCount > 0) {
+      setStep(current);
+    }
+    refreshHint();
+  }
+
+  /** Both layers on, and a driver to rain with. */
+  function seriesAvailable() {
+    const state = active();
+    const source = activeKey ? sources.get(activeKey) : null;
+    return Boolean(
+      seriesHandler &&
+        state?.grid &&
+        stampsMs.length > 1 &&
+        attachedMap &&
+        source &&
+        attachedMap.hasLayer(source.layer) &&
+        seriesHandler.canStart()
+    );
+  }
+
+  function setHint(text) {
+    dom.hint.hidden = !text;
+    dom.hint.textContent = text || '';
+  }
+
+  /** The standing hint: how to start, shown whenever it would work. */
+  function refreshHint() {
+    clearTimeout(hintTimer);
+    hintTimer = 0;
+    setHint(
+      seriesAvailable()
+        ? 'Shift + drag the bar to rain this forecast onto the map, hour by hour.'
+        : null
+    );
+  }
+
+  /** Why Shift + drag did nothing, for a few seconds. */
+  function flashHint() {
+    const text = !seriesHandler?.canStart()
+      ? 'Shift + drag rains this forecast onto the map: tick the Rainfall Simulator layer first.'
+      : 'Shift + drag rains this forecast onto the map: switch this forecast layer on first.';
+    setHint(text);
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(refreshHint, 3200);
   }
 
   /** Nearest step in the active grid to the moment last looked at. */
@@ -409,14 +622,17 @@ function createForecastCard({ boundary }) {
       dom.total.textContent = '-';
       days = [];
       stepCount = 0;
+      stampsMs = [];
       chipHtml = '';
       updateChip();
+      refreshHint();
       return;
     }
 
     const { grid } = state;
     days = groupByDay(grid.times);
     stepCount = grid.times.length;
+    stampsMs = grid.times.map((time) => Date.parse(time));
 
     // "hourly" is already implied by the timeline.
     dom.source.textContent = `${state.name} · ${grid.resolutionText.split(',')[0]}`;
@@ -438,12 +654,17 @@ function createForecastCard({ boundary }) {
     // Land on the hour being looked at before the switch; failing that, now.
     const target = Number.isFinite(lookingAt) ? lookingAt : Date.now();
     setStep(stepNearest(target));
+    refreshHint();
   }
 
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   /** Rebuild the timeline for the active source, sliding the old one away. */
   async function show(key, { animate = true } = {}) {
+    // A span rained from one run means nothing on another's bar.
+    if (series) {
+      seriesHandler?.end();
+    }
     activeKey = key;
     const token = ++swapToken;
 
@@ -497,21 +718,62 @@ function createForecastCard({ boundary }) {
     });
   }
 
-  let dragging = false;
+  // 'steps' is the ordinary scrub; 'end' is Shift + drag, placing the end of
+  // the forecast-rain span; 'scrub' is a plain drag inside the span.
+  let dragging = null;
   dom.track.addEventListener('pointerdown', (event) => {
-    dragging = true;
+    if (event.shiftKey && seriesHandler) {
+      if (!seriesAvailable()) {
+        flashHint();
+      } else {
+        const ms = msAtClient(event.clientX);
+        // A fresh span when none is running, or the pointer landed before
+        // this one's start; otherwise the end of the running span moves.
+        if (!series || ms < series.fromMs) {
+          seriesHandler.begin({ grid: active().grid, fromMs: ms });
+        }
+        seriesHandler.setEnd(ms);
+        dragging = 'end';
+        dom.track.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        return;
+      }
+    }
+
+    if (series) {
+      // On the span: look at that moment of it. Off it: the forecast is
+      // just being looked at again, and the span and its water go.
+      if (onSpan(event.clientX)) {
+        seriesHandler?.showAt(msAtClient(event.clientX));
+        dragging = 'scrub';
+        dom.track.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        return;
+      }
+      seriesHandler?.end();
+    }
+    dragging = 'steps';
     dom.track.setPointerCapture(event.pointerId);
     setStep(stepAt(event.clientX));
     event.preventDefault();
   });
   dom.track.addEventListener('pointermove', (event) => {
-    if (dragging) {
+    if (dragging === 'steps') {
       scrubTo(stepAt(event.clientX));
+    } else if (dragging === 'end') {
+      seriesHandler?.setEnd(msAtClient(event.clientX));
+    } else if (dragging === 'scrub') {
+      // The driver shows at most one moment per frame.
+      seriesHandler?.showAt(msAtClient(event.clientX));
     }
   });
   for (const type of ['pointerup', 'pointercancel']) {
     dom.track.addEventListener(type, (event) => {
-      dragging = false;
+      // The span plays once its end is let go of.
+      if (dragging === 'end') {
+        seriesHandler?.play();
+      }
+      dragging = null;
       if (dom.track.hasPointerCapture(event.pointerId)) {
         dom.track.releasePointerCapture(event.pointerId);
       }
@@ -522,8 +784,30 @@ function createForecastCard({ boundary }) {
     if (jump === undefined) {
       return;
     }
+    if (series && seriesHandler) {
+      if (event.shiftKey) {
+        // Shift moves the end, and the span plays on to it.
+        seriesHandler.setEnd(series.endMs + jump * stepMs());
+        seriesHandler.play();
+      } else {
+        seriesHandler.showAt(series.shownMs + jump * stepMs());
+      }
+      event.preventDefault();
+      return;
+    }
     setStep(current + jump);
     event.preventDefault();
+  });
+  dom.track.title =
+    'Drag to scrub the hours · Shift + drag to mark a span of the forecast to rain onto the map';
+
+  // The span cursor is placed in pixels, so it has to follow the panel.
+  window.addEventListener('resize', () => {
+    if (series) {
+      placeSeriesHead();
+    } else if (active()?.grid) {
+      clampLabel();
+    }
   });
 
   // --- map readout -----------------------------------------------------------
@@ -603,6 +887,9 @@ function createForecastCard({ boundary }) {
     },
 
     onSourceHidden(key, map) {
+      if (series && key === activeKey) {
+        seriesHandler?.end();
+      }
       if (map && !anySourceOnMap(map)) {
         map.off('mousemove', onMove);
         map.off('zoomend', onZoom);
@@ -614,7 +901,42 @@ function createForecastCard({ boundary }) {
       }
       // The card keeps showing the last source: the forecast is worth reading
       // whether or not it is drawn on the map.
+      refreshHint();
     },
+
+    /**
+     * Wire up Shift + drag. handler.canStart() says whether the simulator is
+     * there to rain onto; begin/setEnd/play/showAt/end drive the span, and
+     * the driver reports back through setSeries.
+     */
+    setSeriesHandler(handler) {
+      seriesHandler = handler;
+      refreshHint();
+    },
+
+    /** From the driver: where the span stands, or null when it has ended. */
+    setSeries(state) {
+      if (!state) {
+        if (series) {
+          exitSeries();
+        }
+        return;
+      }
+
+      const entering = !series;
+      series = state;
+      if (entering) {
+        dom.timeline.classList.add('timeline--series');
+      }
+      const bucket = bucketOfMs(state.shownMs);
+      if (entering || bucket !== current) {
+        showBucket(bucket);
+      }
+      placeSeriesHead();
+    },
+
+    /** Re-read the standing hint after a layer changed under it. */
+    refreshHint,
 
     /** A source's data changed; if it is the one on the card, redraw it. */
     onSourceUpdated(key) {

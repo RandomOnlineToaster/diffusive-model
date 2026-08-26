@@ -383,7 +383,7 @@ export async function loadTmdForecastGrid(rawBounds) {
  * the distinct coordinates recovers the rows and columns, which is what makes
  * smooth interpolation possible.
  */
-function toLattice(points) {
+export function toLattice(points) {
   const key = (value) => Number(value.toFixed(4));
   const lats = [...new Set(points.map((p) => key(p.lat)))].sort((a, b) => a - b);
   const lngs = [...new Set(points.map((p) => key(p.lng)))].sort((a, b) => a - b);
