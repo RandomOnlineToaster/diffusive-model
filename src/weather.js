@@ -1,5 +1,6 @@
 import L from 'leaflet';
 import { config } from './config.js';
+import { stepContaining } from './forecastAxis.js';
 import {
   createForecastGridLayer,
   FORECAST_LEGEND,
@@ -641,11 +642,10 @@ function createForecastCard({ boundary }) {
       .join('');
     dom.track.setAttribute('aria-valuemax', String(stepCount - 1));
 
-    const stamp = new Date();
-    const nowKey =
-      `${stamp.getFullYear()}-${String(stamp.getMonth() + 1).padStart(2, '0')}-` +
-      `${String(stamp.getDate()).padStart(2, '0')}T${String(stamp.getHours()).padStart(2, '0')}`;
-    const nowStep = grid.times.findIndex((time) => String(time).startsWith(nowKey));
+    // The step the present moment falls in, by parsed time: a string match on
+    // the local hour broke on stamps with an offset and on an axis missing an
+    // hour, hiding the marker.
+    const nowStep = stepContaining(stampsMs, Date.now(), (grid.stepHours || 1) * 3600 * 1000);
     dom.now.hidden = nowStep < 0;
     if (nowStep >= 0) {
       dom.now.style.left = `${(fractionOf(nowStep) * 100).toFixed(3)}%`;
@@ -1173,7 +1173,7 @@ export async function createRainGaugeLayer({ isInside } = {}) {
     );
 
     const rows = [
-      ['Rainfall', `${station.rainMm.toFixed(1)} mm`],
+      ['Rain, 24 h to 07:00', `${station.rainMm.toFixed(1)} mm`],
       ['Temperature', station.temperature ? `${station.temperature} °C` : null],
       ['Humidity', station.humidity ? `${station.humidity} %` : null],
       ['Wind', station.windSpeed ? `${station.windSpeed} km/h from ${station.windDirection}°` : null],
@@ -1186,7 +1186,7 @@ export async function createRainGaugeLayer({ isInside } = {}) {
         '<table class="wx-forecast"><tbody>' +
         rows.map(([label, value]) => `<tr><td>${label}</td><td>${value}</td></tr>`).join('') +
         '</tbody></table>' +
-        `<small>Observed ${station.observedAt}<br>Thai Meteorological Department</small>`
+        `<small>Observed ${station.observedAt} (TMD reports once a day: the 24 h total to 07:00)<br>Thai Meteorological Department</small>`
     );
 
     group.addLayer(marker);

@@ -10,6 +10,14 @@ storms and routes the resulting water across terrain and streets.
   junctions, heights sampled from the 30 m COP30 DEM). Water moves by
   **water-surface** slope using Manning's law, so a flooded downstream street
   backs water up onto its neighbours instead of swallowing it forever.
+- **Drainage physics** — the surveyed drain network runs as a pipe graph
+  under the streets: grated inlets take water down at a weir/orifice rate,
+  pipes carry it by Manning's law from their surveyed diameters, outfalls
+  discharge against the **tide** (and let the sea back in at high water),
+  pump stations lift it out, and a manhole filled to its lid spills back
+  onto the street. The ground soaks water on Horton's curve, new storm cells
+  drift with the forecast **wind**, and an **ensemble** of jittered replays
+  gives a flood chance per street. See *Drainage physics* below.
 - **Flow paths / accumulation / direction** — D8 routing on the DEM analysis
   grid, for the catchment-scale picture. Flow Direction, Flow Paths and
   Street Flow are all drawn as moving particle trails, the way wind maps
@@ -24,8 +32,47 @@ storms and routes the resulting water across terrain and streets.
   hour by hour), and measured rainfall from the
   [Thai Meteorological Department](https://data.tmd.go.th/)'s own rain
   gauges — 127 stations nationwide, 14 of them inside the study area.
-- **Infrastructure layers** — rivers, water bodies, water gates, drainage
-  pipes and sensor stations.
+- **Drainage Network** — the city's surveyed drainage, from its GIS
+  geodatabase: **Drainage Pipes** (gravity drains and box culverts, coloured
+  by type and weighted by bore) and **Drainage Covers** (manholes and grated
+  inlets). Click any pipe or cover for its survey detail — size, material,
+  manhole depth. The covers are ~80k points, so that layer loads on first use
+  and only draws once zoomed in to street level.
+- **Infrastructure layers** — rivers, water bodies, water gates, a demo pipe
+  network (seeding the pipe simulation) and sensor stations.
+
+## Drainage physics
+
+Everything below is a **calculation function with stated assumptions**, so
+better data - surveyed invert levels, real pump capacities, 2 m contours -
+can replace an assumption without touching the maths. The formulas live in
+`src/hydraulics.js` (pure, checked by `npm test`); the models in
+`src/pipeNetwork.js` (pipes), `src/roadFlow.js` (streets), `src/tide.js`,
+`src/wind.js` and `src/ensemble.js`.
+
+| Piece | What it does | Assumption until better data arrives |
+| --- | --- | --- |
+| Pipe graph | `scripts/build-drainage-model.py` snaps the 4.5k surveyed drain runs into ~6.9k junctions and ~9.4k conduits, each with its surveyed size (round or box), material roughness and length | Junction ground = nearest street junction's DEM height; invert = ground - 0.6 m cover - pipe height (`PIPE_COVER_DEPTH_M`) |
+| Pipe flow | Manning's equation on the **hydraulic grade line** between junctions, for the depth of flow in the pipe, in whichever direction the HGL slopes; a manhole is a tank (shaft + half of each pipe) that surcharges above the crown and spills onto its street at the lid | Shaft plan area from the cover survey where recorded, else 1 m² |
+| Inlets | Each grated cover feeds the nearest conduit at min(weir, orifice) capacity for the standing depth, half blocked by litter (`VITE_INLET_CLOGGING`), and only while the manhole has room | Grate 0.4 x 0.6 m where the survey has no size |
+| Outfalls | A run end within 250 m of the coast is a **sea outfall** whose receiving level is the live sea level; one within 40 m of an OSM waterway is a canal outfall (free); a network with neither gets its lowest dead end as an outfall | Open outfalls: the tide flows back in (`VITE_OUTFALL_FLAP_VALVE`) |
+| Pumps | 62 of the 64 surveyed stations sit on the graph; each pumps its sump out above a start depth until a stop depth | Every station 1 m³/s (`VITE_PUMP_RATED_M3S`) - the survey records names only |
+| Sea level | Open-Meteo Marine hourly sea level (tide + surge), read a little offshore at the moment on the scenario's clock; a synthetic harmonic tide when offline; a **surge slider** adds metres on top | COP30 heights ~ metres above MSL |
+| Streets | Street dead ends at or below 1.5 m meet the sea and drain against it - or take it in when drowned; other dead ends discharge freely. Inside the surveyed area the inlets are the only way down; outside it the generic `VITE_STREET_DRAIN_MM_H` term stands in | Coast recognised by height alone in the street graph |
+| Infiltration | The pervious share of wet ground (5 % of a street patch, 35 % of the flood strip past the kerb) soaks on Horton's curve, 60 -> 12 mm/h | Sandy loam everywhere |
+| Wind | Open-Meteo hourly wind; a new storm cell drifts at 0.75 x the 850 hPa wind (or 1.5 x the 10 m wind when no wind aloft is served); surface wind, gusts and pressure show in the panel | |
+| Ensemble | **Run ensemble** replays the placed storms N times from dry ground with jittered track, speed, bearing, size and intensity (seeded, so repeatable), records each street's peak depth, and paints the share of runs deeper than 5 cm | 8 members x 3 h at 5-minute steps, about 30 s |
+
+The panel's *Sea level*, *Wind*, *In the drains* and *Absorbed* tiles show the
+live state (hover for the water balance), the sample-point popup names the
+nearest manhole and how full it is, and the **Drainage Pipes** layer
+recolours each run by how full it runs while it rains.
+
+Known gap, deliberately left for the data pass: the street heights come from
+COP30, which sits 3-4 m above the city's own benchmarks on the coastal flat,
+so where water ponds is only as good as those heights. The pipe model reads
+its ground levels from the same street heights, so correcting them (from the
+city's 2 m contours) corrects both at once.
 
 ## Requirements
 
@@ -45,6 +92,104 @@ npm run dev
 The derived data the app reads at runtime is committed, so it runs straight
 after a clone — no API key needed unless you want to rebuild the DEM.
 
+## Using the map
+
+The page is a map with three layer boxes (Geography, Water Simulation,
+Weather) and a side panel. Hover almost anything for its detail: layer names
+carry hints, the panel tiles carry the full water balance, storm sliders
+show their values, and pipes and covers open a survey card when clicked.
+
+### 1. Place a storm and play it
+
+1. Tick **Rainfall Simulator** in the Water Simulation box (it paints the rain
+   and lets the water layers draw).
+2. Click **Add storm**, then click the map where the cell should sit. The new
+   cell drifts with the forecast steering wind (see the *Wind* tile); its
+   card in the panel has sliders for peak intensity, size (σ), rain and cloud
+   radius, speed and bearing, and a *Remove storm* button. Several storms can
+   be placed; overlapping rain adds up. Drag a storm's centre on the map to
+   move it.
+3. Press **Play**. **Speed** is simulated seconds per real second (10x by
+   default: a minute of storm every six seconds). **Reset** clears the storms
+   and every drop of water.
+
+The readouts show the peak rain rate now, the wettest cell's depth this
+step, the total rain that has fallen and the water standing on the streets
+right now. The line under the legend is a live probe of the cell under the
+cursor. Click anywhere on the map for a **sample point** popup: elevation,
+rain here, water on the ground, the deepest flooded street within 60 m and
+the nearest drain with how full it is - it keeps updating while the storm
+runs.
+
+### 2. Watch where the water goes
+
+| Layer | Shows | Notes |
+| --- | --- | --- |
+| **Street Flow** | While it rains: every wet street coloured by standing depth (green 0.5 cm → red 50 cm), with particle trails running the way the water is actually moving. Without rain: the terrain's steepest-descent routes | Hover a street for its depth and flow. **Flow detail** trades chains for speed |
+| **Ponding** | The standing water itself: a blue sheet over the ground each wet junction has spread to, darker the deeper | Sits under the other layers. Needs real depth - a light shower drains before it ponds; the default 100 mm/h cell over central Pattaya floods within a few minutes |
+| **Flow Direction / Flow Paths** | The 200 m grid's D8 field and channel tree; under rain the tree is lit where rain has recently fallen | Catchment scale, not street scale |
+| **Catchment (flow accumulation)** | Upstream area draining through each grid cell - where flow converges | Not where water stands: that is Ponding |
+| **Drainage Pipes** | The surveyed drain runs, coloured by type and weighted by bore; while it rains, recoloured by how full each run is (blue → red) | Click a run for size, material, length |
+| **Drainage Covers** | Manholes (slate) and grated inlets (blue) | Draws from zoom 15 in. Click one for cover size, manhole depth, source |
+
+Shift + click a flow layer's checkbox for its classic rendering (dashes, or
+arrows for Flow Direction) instead of the particle trails.
+
+### 3. The drainage tiles, surge and ensemble
+
+Under the storm readouts:
+
+- **Sea level** - the tide at the outfalls at this moment of the scenario
+  (live Open-Meteo Marine forecast, synthetic tide when offline), plus the
+  surge slider. Hover for the source.
+- **Wind** - surface wind now; hover for gusts, pressure and the steering
+  wind a new storm inherits.
+- **In the drains** - water inside the surveyed pipes; hover for manholes
+  surcharged, pumps running, discharged, back in from the sea, spilled.
+- **Absorbed** - water the ground has soaked up plus the generic drains
+  outside the surveyed area; hover for inlets, outfalls and sea backflow.
+- **Storm surge** - metres added to the sea level, applied at once: push it
+  up to see the beach outfalls drown and the sea come up the drains.
+- **Run ensemble** - with at least one storm placed, replays the scenario
+  eight times with jittered tracks, speeds, sizes and intensities (about
+  30 s; the button becomes *Cancel*) and paints Street Flow as the chance
+  each street floods deeper than 5 cm. Hover a street for "6 of 8 runs".
+  Play or Reset clears it.
+
+### 4. Rain a forecast instead
+
+Tick **Rain Forecast (Open-Meteo)** (or **(TMD)** with a token in
+`.env.local`) in the Weather box. The timeline in the panel shows the next
+days hour by hour; click or drag along it to look at any hour, and the map
+paints that hour's rain as a heatmap with the peak and day total beside it.
+The orange marker is now.
+
+To **play** it onto the simulator, tick Rainfall Simulator too, then
+**Shift + drag** along the timeline: the span between the two red lines
+plays from its start, at the speed slider's pace, re-weighting Flow Paths,
+Catchment and Street Flow by the water as it goes. Play pauses and resumes,
+Reset rewinds to the span's first hour, click inside the span to jump to a
+moment, Shift + drag again to move its end, and a plain click outside it
+clears it. Storms placed during a span rain into the same water. (Under a
+forecast span the streets are routed at steady state - ponding, inlets,
+tide and pumps only act on placed storms for now; see *Status*.)
+
+**Cloud Cover** adds JAXA's satellite cloud tops for the latest available
+hour; **Rain Gauges (TMD)** plots the provincial gauges with their 24 h
+rainfall to 07:00 - the only measured ground truth on the map.
+
+### 5. Things worth knowing
+
+- Everything is tunable in `.env.local` (copy `.env.example`): storm
+  defaults, street physics, inlet clogging, pump rates, tide mode, wind
+  steering, ensemble size. Restart `npm run dev` after changing it.
+- The street network covers Pattaya to Sattahip; rain outside it falls on
+  nothing, and the panel says so.
+- In the dev server, `window.__waterMap` in the browser console exposes the
+  simulator and models for scripting, e.g. `__waterMap.rainfall.advance(600)`
+  steps ten minutes and `__waterMap.roadFlow.dynamic.totals()` prints the
+  water balance.
+
 ## Data pipeline
 
 Raw DEM downloads are **not** committed: `chonburi-dem.asc` is ~210 MB, past
@@ -58,6 +203,9 @@ GitHub's file limit, and everything is reproducible.
 | `npm run build:roads` | Build the street graph with DEM-sampled heights |
 | `npm run fetch:rivers` / `fetch:water` | Download OSM waterways and water bodies |
 | `npm run build:pattaya` | Build pipe and sensor layers from the GIS exports in `data/pattaya` |
+| `npm run extract:drainage` | Export the surveyed drains, covers and pump stations from the city geodatabase |
+| `npm run build:drainage` | Build the pipe graph the simulation runs (`drainage-model.json`) from those exports and the street graph |
+| `npm test` | Check the hydraulic formulas and the pipe model against known values |
 
 ## Weather data
 
@@ -162,10 +310,267 @@ Manning roughness, drain capacity, kerb height, flood colour stops). Only
 `VITE_*` variables reach the browser, which is why the API key never ships in
 the bundle.
 
+## How the simulation works - the maths
+
+Water moves through the app in this order, and each stage below names the
+file it lives in, the formula it uses and the constants it assumes. Units are
+SI throughout (m, m², s, m³/s) except rain, which is quoted in mm/h.
+
+### 1. Preparing the ground
+
+**DEM grids** (`scripts/build-dem-cache.py`, `src/terrain.js`). The 30 m COP30
+raster is resampled to a 512 × 512 analysis grid (~200 m cells) and a 256 ×
+256 contour grid. Before routing, depressions are filled by *priority-flood*
+(Barnes et al. 2014): every cell is raised to the lowest level from which it
+can reach the grid edge or the coast, plus an epsilon of 1e-5 m per step so a
+filled bowl still has a downhill direction across it. Slope is the central
+difference `√((dz/dx)² + (dz/dy)²)`; flow direction is **D8** (steepest drop
+to one of the eight neighbours); flow accumulation is a topological pass that
+adds each cell's weight (1, or its rain depth in rain mode) to its downstream
+cell, so a cell's value is the number of cells - or the mm of water - draining
+through it. Contours are marching squares at 5/10/20/50 m intervals.
+
+**Street graph** (`scripts/build-road-network.py`, `src/roadFlow.js`). OSM
+streets become a graph of 266k junctions and 273k links; extra points are
+inserted every 20 m so height can vary along a street, and each point takes a
+**bilinear** DEM height so neighbours inside one 30 m cell still differ.
+Shoreline points that sample water are clamped to 0 m. At load the heights are
+cleaned: six passes clamp any junction more than 0.25 m from the mean of its
+neighbours (building bleed), dead-end tips are held within 0.1 m below their
+only neighbour, and depressions shallower than 0.35 m or spanning fewer than 3
+junctions are filled (sampling noise). Sinks are then filled on the graph the
+same priority-flood way (epsilon 1e-4 m), with outlets at every junction
+within 1 m of the lowest height and every junction on the 1 % margin of the
+downloaded box, and each junction's `downstream` is its lowest neighbour.
+
+**Drain graph** (`scripts/build-drainage-model.py`). Run ends within 3 m are
+snapped into junctions; a run ending against the side of another run splits it
+(T-junction). Size strings become a round diameter or a box `W × H` (values
+over 20 are millimetres); Manning n is 0.011 for HDPE/PVC and 0.013 for
+concrete. Each junction's ground is the nearest street junction's height and
+its invert is `ground − 0.6 m cover − pipe height`. Outfalls: a dead end within
+250 m of the coast meets the sea, one within 40 m of an OSM waterway is free,
+and a network with neither gets its lowest dead end as an outfall. Grated
+covers become inlets on the nearest conduit with perimeter `2(w + l)` (or
+`π·d`) and open area `w·l·0.5`.
+
+### 2. Rain
+
+**Storm cells** (`src/storm.js`, `src/rainfallGrid.js`) are Gaussians on a
+400 × 400 grid over the DEM bounds (~260 m cells):
+
+    I(d) = Imax · exp(−d² / 2σ²)     for d < rain radius, else 0
+
+summed over overlapping cells (defaults Imax 100 mm/h, σ 1000 m, rain radius
+3000 m, cloud radius 5000 m). A smooth value-noise field on an 8-cell lattice,
+drifting with time, scales it by ±15 % so the disc is not perfectly round. A
+cell moves at its velocity vector (m/s); a newly placed cell takes that vector
+from the steering wind (see 5).
+
+Each step adds `I · dt / 3600` mm to the cell's accumulation. The grid's own
+*surface water* field decays as `ds/dt = I/3600 − s/τ` with τ = 900 s; at a
+steady rate that has the closed form `s(t + dt) = s·e^(−dt/τ) + I·(τ/3600)·(1 −
+e^(−dt/τ))`, which is why a whole forecast hour can be integrated in one call.
+This field only weights the grid flow layers (Flow Paths / Accumulation) and
+forecast Street Flow; the street ponding model takes the rain rate directly.
+
+**Forecast rain** (`src/forecastRain.js`). Each forecast cell's "mm between T
+and T + 1 h" becomes a steady rate `mm / hours` over that hour, mapped onto the
+rain grid by nearest cell. A moving storm laid over it is advanced in slices
+no longer than half its rain radius at its speed (at most 600 slices per span),
+placed at the middle of each slice so its track is even. Scrubbing backwards
+re-rains the span from its start, so what is on screen is a pure function of
+(span start, moment shown, storms).
+
+### 3. Water on the streets (`src/roadFlow.js`)
+
+State is a **volume** per junction. Each junction collects rain from a strip
+60 m wide along half of every street it touches, of which 90 % runs off:
+
+    runoffFactor = max(1, 0.9 · halfLength · 60 / 120)      (120 m² = one street patch)
+    rain added   = I · dt/3.6e6 · 120 · runoffFactor         [m³]
+
+Depth comes from a two-stage stage-storage curve: up to the 0.15 m kerb the
+water stands on the 120 m² patch (`depth = V / 120`); above it the flood
+spreads over the whole catchment strip (`depth = 0.15 + (V − 18) / stripArea`).
+
+Every link moves water by **Manning's law on the water-surface slope**, never
+the ground slope, which is what makes a full downstream street back water up:
+
+    head = (z_a + d_a) − (z_b + d_b)
+    v    = (1/n) · d^(2/3) · √(head / L)        n = 0.015, v ≤ 3 m/s
+    ΔV   = min( d · v·dt/L , 0.25 · head ) · 120  [m³]   (never past a quarter of levelling)
+
+A step is split into `min(8, ⌈3·dt/15⌉)` substeps. Each substep is two-phase:
+all transfers are proposed from the frozen state, scaled so no junction sends
+more than it holds, then landed together - order-independent and
+mass-conserving. Films under 0.5 mm do not flow; volumes under 0.012 m³ snap
+to dry (counted, so the balance still closes).
+
+Water leaves a junction four ways, in this order each step:
+
+* **Inlets** - each grated cover takes `min(1.66·P·d^1.5, 0.67·A·√(2·g·d)) ·
+  (1 − clogging) · dt` (weir, then orifice; clogging 0.5), and only as much as
+  the manhole below has room for.
+* **Infiltration** - the pervious share of the wet area (5 % of a street
+  patch, 35 % of the flood strip) soaks at Horton's rate `f = fc + (f0 − fc)·
+  e^(−k·t)` with f0 60 mm/h, fc 12 mm/h, k 2/h, t = time since the junction got
+  wet.
+* **Generic drain** - only outside the surveyed network (no junction within
+  150 m of a drain junction): at most 150 mm/h over the wet area.
+* **Outfalls** - dead ends of the graph. Those at or below 1.5 m meet the
+  sea: they discharge over a 20 m nominal edge to `max(tide, z − 0.5)`, and when
+  the tide stands above the street water the same edge carries the sea IN, at
+  Manning's rate for the depth it covers the street to. Other dead ends
+  discharge over a nominal edge of slope `0.0005 + d/20`.
+
+Severity colours are fixed depth stops: 0.5 cm (drawn), 5, 15, 30, 50 cm.
+
+### 4. Water in the drains (`src/pipeNetwork.js`, `src/hydraulics.js`)
+
+State is a volume per manhole; from it comes the water level - the
+**hydraulic grade line** (HGL). A manhole is a tank: below the crown of its
+pipes its plan area is `shaft + Σ(½ · pipe area · pipe length / pipe height)`
+(filling it fills the near half of each pipe); above the crown only the shaft
+fills (**surcharge**); at the street lid the excess **spills** onto the street
+junction above it.
+
+Each conduit moves water from its higher end at Manning's rate for the depth
+of flow at that end, `y = min(HGL − invert, pipe height)`:
+
+    circular: θ = 2·acos(1 − 2y/D),  A = D²/8·(θ − sin θ),  P = D·θ/2
+    box:      A = W·y,  P = W + 2y      (full: P = 2(W + H))
+    Q = (1/n) · A · (A/P)^(2/3) · √(ΔHGL / L),   Q ≤ 4 m/s · A
+    ΔV = min( Q·dt , 0.25 · ΔHGL · A_a·A_b/(A_a + A_b) )
+
+so a Ø0.60 concrete drain at 0.3 % carries about 0.34 m³/s full - roughly
+200 m of street at 100 mm/h. Substeps are `min(30, ⌈4·dt / shortest conduit⌉)`
+with the same two-phase scheme as the streets.
+
+Outfalls discharge through a 20 m nominal conduit the size of the largest one
+arriving. A **sea outfall**'s receiving level is the live sea level (or
+`invert − 0.3` when the tide is lower); when the sea stands above the
+manhole's HGL it flows *in* through the same pipe (backflow), unless flap
+valves are switched on. A **free outfall** always drains to `invert − 0.3`.
+**Pumps** start at 0.5 m sump depth and stop at 0.1 m, lifting 1 m³/s out of
+the system.
+
+### 5. Sea level and wind (`src/tide.js`, `src/wind.js`)
+
+Sea level at the outfalls is Open-Meteo Marine's hourly `sea_level_height_msl`
+(tide + surge), interpolated at the moment on the scenario's clock (the storm
+clock counts from "now"; a forecast span uses its own time), plus the surge
+slider's offset. Offline, the level is a harmonic tide
+
+    η(t) = Σ a_i · cos(2π·t/T_i − φ_i)     K1 0.55 m, O1 0.35 m, M2 0.25 m, S2 0.10 m
+
+which has Pattaya's mixed, mainly diurnal shape (~2 m range) but arbitrary
+phase. COP30 heights (EGM2008) are taken as metres above mean sea level.
+
+Wind is Open-Meteo's hourly 10 m wind, gusts and MSL pressure, plus the 850 hPa
+wind where the model serves it. A new storm cell moves *towards* `direction +
+180°` at `0.75 × the 850 hPa speed` (or `0.75 × 1.5 × the 10 m speed`);
+directions are interpolated as vectors so 350° → 10° passes through north.
+
+### 6. Ensemble (`src/ensemble.js`)
+
+`Run ensemble` replays the placed storms N times from dry ground (default 8
+members × 3 h in 5-minute steps). Member 1 is the storms as placed; the others
+draw seeded Gaussian jitters - track ±1500 m, speed ±30 %, bearing ±25°,
+intensity ±30 %, size ±20 % - so a run repeats exactly. Each member records
+every junction's peak depth; the painted value is
+
+    P(flood) = members with peak depth ≥ 5 cm / members
+
+on fixed stops of 5, 20, 40, 60 and 80 %.
+
+### 7. Where the maps come from
+
+*Flow Direction* and *Flow Paths* draw the D8 tree of the analysis grid (cells
+above the 98.5th percentile of accumulation, or above 5,000 m³ of storm water
+in rain mode); *Catchment (flow accumulation)* is that tree's upstream area -
+where flow converges, not where water stands. *Street Flow* draws the street
+chains carrying at least 25 upstream junctions - or, while it rains, the
+standing depth from stage 3, chained along the LIVE flow: each wet junction
+links to the neighbour it actually sent the most water to over the last
+step, so a backed-up street shows its water heading upstream and standing
+water ends a chain. *Ponding* paints each wet junction's depth over the area
+it has spread to (the street patch below the kerb, the catchment strip above
+it), so pools read as pools. The *Drainage Pipes* layer recolours each
+surveyed run by `max(depth at either end) / pipe height` from stage 4; the
+*Drainage Covers* layer draws the 80k covers from a grid index onto one
+canvas, inlets in blue. Colour classes on the flow layers are
+logarithmic in accumulation; on the streets and pipes they are the fixed
+stops above, so a colour always means the same amount of water.
+
+## Status - what it can do, what is left, what has to change
+
+### What it can do now
+
+- Place storm cells (Gaussian, moving, editable) or rain a real forecast
+  span onto the map, and watch the water run along 266k street junctions
+  with backwater, ponding and kerb overtopping.
+- Drain that water the way the city does: 3,493 surveyed grated inlets into
+  9,399 surveyed pipe runs, Manning flow by pipe size, trunks that fill and
+  back up, manholes that surcharge and spill back onto the street, 141 beach
+  outfalls that stop at high tide and let the sea in, 62 pump stations that
+  lift water out, ground that soaks on Horton's curve.
+- Read the live sea level (tide + surge) and wind, drift new storms with the
+  steering wind, try a what-if surge with a slider, and run an ensemble of
+  jittered storms to get a flood *chance* per street instead of one answer.
+- Show all of it: flood depth per street on fixed colour stops with chains
+  along the live flow, pools of standing water (Ponding), pipe fill per run, live water balances on the panel tiles, a sample-point popup with
+  the nearest manhole, GSMaP cloud, two forecast providers and the TMD gauges.
+- Prove it conserves water: `npm test` plus a headless run close both balances
+  to under 1e-5 m³.
+
+### What is left to build
+
+- **Forecast rain through the drains.** A forecast span still routes its
+  runoff at steady state (`roadFlow.refresh`); it does not step the ponding
+  and pipe models hour by hour, so tide, inlets and pumps only act on placed
+  storms. The models are ready for it; the span's replay-on-scrub design is
+  what has to change.
+- **Forecast ensemble.** The ensemble jitters placed storms only. Open-Meteo
+  serves ensemble members (`ensemble-api.open-meteo.com`) that could drive the
+  same runner from real forecast spread.
+- **Canals as channels.** Khlongs are drawn (OSM) but are not part of the
+  routing: streets and pipes that reach one simply lose the water. A channel
+  model with its own level would close the loop, and it is where the
+  tide-versus-runoff conflict really plays out.
+- **Water outside streets.** Runoff is only tracked on the street graph.
+  Yards, car parks and open ground are the catchment strip's abstraction; a
+  2-D overland grid would replace it.
+- **Validation.** The city's 17 flood-risk polygons and the TMD gauges are on
+  the map but nothing scores the model against them yet.
+- Smaller: per-station pump rates once known; flap-valve list per outfall;
+  TMD's 3-hourly gauge product (`Weather3Hours`) instead of the once-a-day
+  24 h total; evaporation (negligible during a storm, not after it).
+
+### What has to change - the data pass
+
+Everything below is a number in `drainage-model.json`, the road network or
+`.env`; none of it touches the formulas.
+
+| Data | Now | Needed | Where it plugs in |
+| --- | --- | --- | --- |
+| Street heights | COP30 (30 m surface model, +3-4 m above the city benchmarks, noisy) | The city's `contour2m` and 366 benchmarks, or LiDAR | `scripts/build-road-network.py` -> `elev[]`; the pipe model reads its ground from the same array |
+| Shoreline | 27 street nodes clamped to 0 m flood from the sea at every high tide | Real beach-road heights (~2-3 m) | same as above; `VITE_SEA_OUTFALL_MAX_ELEV_M` then means what it says |
+| Pipe inverts | `ground - 0.6 m - pipe height` | Surveyed invert levels (the `ความลึกหลังท่อระบายน้ำ` depth points are a start) | `nodes.invert[]` in the model JSON |
+| Pump capacity | 1 m³/s everywhere, start 0.5 m / stop 0.1 m | Rated flow and levels per station | `VITE_PUMP_*` now; per-node fields when known |
+| Inlets | 3,493 of 3,800 grates attached; 307 had no pipe or street within reach; grate size defaulted where the survey has none | Check the unattached grates; survey grate sizes | `inlets` in the model JSON |
+| Clogging | 50 % of every grate | Inspection data, or seasonal | `VITE_INLET_CLOGGING` |
+| Outfall type | Coast within 250 m = sea; waterway within 40 m = canal; 49 networks got an assumed outfall | Confirm each outfall and its flap valve | `nodes.kind[]`, `nodes.assumedOutfall[]` |
+| Soil | Sandy loam (Horton 60 -> 12 mm/h) everywhere, 35 % pervious strip | Soil / land-cover map | `VITE_INFILTRATION_*`, `VITE_PERVIOUS_*` |
+| Rain observations | TMD once-a-day 24 h totals at 5 provincial gauges | 3-hourly gauges, or the city's own rain sensors | `src/weather.js` gauge fetch |
+
 ## Data sources
 
 - Elevation: Copernicus GLO-30 (COP30) via OpenTopography
 - Cloud cover: JAXA Global Satellite Mapping of Precipitation (GSMaP)
 - Rainfall forecast: Thai Meteorological Department, with Open-Meteo as a keyless fallback
 - Roads, waterways, water bodies: OpenStreetMap contributors (ODbL)
-- Drainage pipes and sensor stations: SMART GIS database export
+- Drainage network (pipes and covers): Pattaya City GIS geodatabase
+  (`Data_Pattaya.gdb`, feature datasets `drain` / `water_pipe`), extracted to
+  WGS84 GeoJSON by `scripts/extract-drainage.py`
+- Sensor stations: SMART GIS database export

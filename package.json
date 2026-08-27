@@ -13,7 +13,10 @@
     "fetch:water": "node scripts/fetch-water.mjs",
     "build:pattaya": "node scripts/build-pattaya-network.mjs",
     "fetch:roads": "node scripts/fetch-roads.mjs",
-    "build:roads": "python scripts/build-road-network.py"
+    "build:roads": "python scripts/build-road-network.py",
+    "extract:drainage": "python scripts/extract-drainage.py",
+    "build:drainage": "python scripts/build-drainage-model.py",
+    "test": "node scripts/test-hydraulics.mjs && node scripts/test-pipe-network.mjs && node scripts/test-forecast-axis.mjs"
   },
   "dependencies": {
     "geotiff": "^2.1.4-beta.0",

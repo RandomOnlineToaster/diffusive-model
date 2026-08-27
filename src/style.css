@@ -1153,6 +1153,40 @@ select {
   border-bottom: none;
 }
 
+/* Drainage click-through: a label/value table like the forecast one, plus a
+   quieter treatment for the Thai original shown beside each English gloss. */
+.drain-detail {
+  width: 100%;
+  margin: 6px 0 4px;
+  border-collapse: collapse;
+  font-size: 0.74rem;
+}
+
+.drain-detail td {
+  padding: 3px 6px 3px 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.drain-detail td:first-child {
+  color: var(--text-muted);
+  white-space: nowrap;
+  padding-right: 12px;
+}
+
+.drain-detail td:last-child {
+  font-weight: 550;
+}
+
+.drain-detail tr:last-child td {
+  border-bottom: none;
+}
+
+.drain-th {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
 
 /* --- Storm rain formula card --- */
 
@@ -1231,4 +1265,18 @@ select {
 
 .formula-table tr:last-child td {
   border-bottom: none;
+}
+
+/* Drainage readouts under the storm readouts: the wind tile carries a longer
+   string ("22 km/h from 224°") than the storm tiles, so it is set smaller and
+   clipped rather than allowed to overflow its tile. */
+.sim-readout--drain {
+  margin-top: 0.35rem;
+}
+
+.sim-readout--drain strong {
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

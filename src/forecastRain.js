@@ -73,6 +73,10 @@ export function createForecastRainDriver({ rainfall, playHoursPerSecond, refresh
     stormsChanged: () => stormsChanged(),
     get playing() {
       return Boolean(session?.playing);
+    },
+    /** The moment on screen, Unix ms - the tide and wind are read at it. */
+    get shownMs() {
+      return session ? session.shownMs : null;
     }
   };
 

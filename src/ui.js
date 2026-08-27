@@ -58,6 +58,32 @@ export function createAppLayout(root) {
 
           <div class="sim-probe" id="sim-probe">Intensity 0.0 mm/h &middot; Surface 0.0 mm &middot; Total 0.0 mm</div>
 
+          <!-- What the drainage is doing, wired in map.js: the sea level the
+               outfalls meet, the wind steering new storms, water held in the
+               surveyed pipes, and water the ground and drains have taken.
+               Each tile carries its detail on hover. -->
+          <div class="sim-readout sim-readout--drain">
+            <div><span>Sea level</span><strong id="sim-sea">--</strong></div>
+            <div><span>Wind</span><strong id="sim-wind">--</strong></div>
+            <div><span>In the drains</span><strong id="sim-drains">0 m&sup3;</strong></div>
+            <div><span>Absorbed</span><strong id="sim-absorbed">0 m&sup3;</strong></div>
+          </div>
+
+          <label class="field field--inline">
+            <span>Storm surge</span>
+            <input id="sim-surge" type="range" min="-1" max="2" step="0.1" value="0"
+              title="Metres added to the sea level at the outfalls, on top of the tide: a what-if surge" />
+            <output id="sim-surge-value">+0.0 m</output>
+          </label>
+
+          <!-- Replays the placed storms with jittered tracks, speeds, sizes
+               and intensities, and paints how often each street floods. -->
+          <div class="sim-controls">
+            <button type="button" id="sim-ensemble" class="sim-button"
+              title="Replay the placed storms several times with jittered tracks, speeds, sizes and intensities, and paint how often each street floods">Run ensemble</button>
+          </div>
+          <p class="sim-note" id="sim-ensemble-status" hidden></p>
+
           <hr class="panel-divider" />
 
           <!-- Driven by weather.js while a Rain Forecast layer is on; the time
@@ -147,12 +173,15 @@ export function createAppLayout(root) {
             <li>Elevation contours: toggleable contour-line overlay</li>
             <li>Rivers &amp; canals: OpenStreetMap waterways (ODbL)</li>
             <li>Lakes, reservoirs and water gates: OpenStreetMap (ODbL)</li>
-            <li>Drainage pipes: SMART GIS database export</li>
+            <li>Drainage network: Pattaya city survey (4.5k drain runs, 80k covers, 64 pump stations), run as a pipe graph with Manning flow, inlet capture, tide-bound outfalls and pumps</li>
+            <li>Sea level: Open-Meteo Marine tide and surge forecast, with a synthetic harmonic tide as fallback</li>
+            <li>Wind: Open-Meteo forecast; the steering wind sets a new storm's drift</li>
             <li>Sensors: in-pipe (tunnel) and pole-mounted road stations</li>
             <li>Flow direction: D8 routing on the analysis grid</li>
-            <li>Flow accumulation: drainage network from the analysis grid</li>
-            <li>Street flow: runoff routed along the OSM street network (30 m DEM heights)</li>
-            <li>Rainfall: Gaussian storm cells on a grid, placed and moved on the map</li>
+            <li>Catchment (flow accumulation): upstream area draining through each grid cell, where flow converges</li>
+            <li>Ponding: standing water per street junction, painted over the ground it has spread to</li>
+            <li>Street flow: runoff routed along the OSM street network (30 m DEM heights); while it rains the chains follow the live flow, with Horton infiltration and inlets into the drains</li>
+            <li>Rainfall: Gaussian storm cells on a grid, placed and moved on the map; an ensemble of jittered replays gives a flood chance per street</li>
           </ul>
         </section>
       </aside>

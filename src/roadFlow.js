@@ -7,6 +7,7 @@ import {
   flowLineRenderer
 } from './flow.js';
 import { createChainParticleLayer } from './flowParticles.js';
+import { hortonRate, inletCapture } from './hydraulics.js';
 import { createMinHeap } from './terrain.js';
 
 // High-detail flow paths routed along the street network.
@@ -78,10 +79,28 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     }
   }
 
-  function rebuild(values, minValue, tooltipFor, classOfOverride = null, aux = null) {
+  function rebuild(
+    values,
+    minValue,
+    tooltipFor,
+    classOfOverride = null,
+    aux = null,
+    // The terrain's steepest-descent pointers by default; the live water
+    // model passes its own, so chains follow where the water is going NOW.
+    downstreamOverride = null
+  ) {
     clearChains();
     const classOf = classOfOverride || accumulationClassifier(minValue, maxOf(values));
-    const lines = chainByClass(nodeCount, downstream, values, classOf, minValue, lat, lng, aux);
+    const lines = chainByClass(
+      nodeCount,
+      downstreamOverride || downstream,
+      values,
+      classOf,
+      minValue,
+      lat,
+      lng,
+      aux
+    );
     lineCount = lines.length;
 
     addLinesByClass(group, lines, {
@@ -122,7 +141,18 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
   //                                               neighbourhood's runoff)
   //   head      = surface[src] - surface[tgt]   (backwater-aware gradient)
   //   v         = (1/n) * depth^(2/3) * sqrt(head / dist)     (Manning)
-  //   depth[n] -= min(depth, drainCap * dt)     (street drains have a capacity)
+  //
+  // and water LEAVES a junction four ways:
+  //
+  //   inlets     a grated cover takes it down at a weir/orifice rate, into
+  //              the pipe network - while the manhole below has room
+  //   soakage    the pervious share of the wet ground infiltrates it, on
+  //              Horton's curve (fast at first, slower as it saturates)
+  //   outfalls   a dead end of the street graph discharges it: freely off the
+  //              map's edge, or against the TIDE where it meets the sea -
+  //              and at high water the sea comes the other way
+  //   drain term outside the surveyed drain network, where no inlet is
+  //              known, a generic capacity stands in for all of the above
   //
   // Because flow follows the water surface, a flooded downstream junction
   // first slows, then stops, then reverses its inflow: blockage propagates
@@ -130,7 +160,7 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
   // finds its own way over. Every substep is two-phase - all transfers are
   // proposed from the state at time t, scaled so no junction sends more than
   // it holds, then landed at once - so the result is order-independent and
-  // mass is conserved to the outfalls and drains.
+  // mass is conserved to the outfalls, drains and pipes.
   function createDynamicWater() {
     // State is VOLUME per junction (m3), not depth. Depth follows from a
     // two-stage storage curve: up to curb height the water stands on the
@@ -145,7 +175,13 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     const proposedOut = new Float64Array(nodeCount);
     const outflowScale = new Float64Array(nodeCount);
     const terminalQ = new Float64Array(nodeCount);
+    const seaInflow = new Float64Array(nodeCount); // m3 the sea pushes onto a drowned outfall
     const flowM3 = new Float64Array(nodeCount); // m3/s through, for tooltips
+    // When each junction last became wet, in simulated seconds (-1 = dry):
+    // Horton's infiltration curve runs from that moment. Drying resets it,
+    // which lets the ground recover instantly - a simplification.
+    const wetSince = new Float32Array(nodeCount).fill(-1);
+    let simSeconds = 0;
 
     const PATCH_M2 = config.streetPatchAreaM2;
     const CURB_M = config.streetCurbDepthM;
@@ -156,6 +192,31 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     const SNAP_DRY_M3 = 1e-4 * PATCH_M2;
     const OUTFALL_LEN = 20;
     const MIN_SLOPE = 0.0005;
+    // A sea outfall at low tide discharges as if the water stood this far
+    // below it; the tide replaces that once it rises above.
+    const OUTFALL_DROP_M = 0.5;
+
+    // Horton's curve in SI: mm/h -> m/s, per hour -> per second.
+    const infiltration = {
+      f0: config.infiltrationF0MmPerHour / 3.6e6,
+      fc: config.infiltrationFcMmPerHour / 3.6e6,
+      k: config.infiltrationDecayPerHour / 3600
+    };
+
+    // Sea level the coastal dead ends drain against, metres MSL. -Infinity
+    // is "no sea": every dead end discharges freely, as before.
+    let seaLevelM = -Infinity;
+    // Which dead ends meet the sea: the low ones. (Height is the only clue
+    // the street graph carries; the pipe network knows its outfalls by
+    // distance to the coast.)
+    const seaOutfall = new Uint8Array(nodeCount);
+    let seaOutfallCount = 0;
+    for (let n = 0; n < nodeCount; n += 1) {
+      if (downstream[n] < 0 && elev[n] <= config.seaOutfallMaxElevM) {
+        seaOutfall[n] = 1;
+        seaOutfallCount += 1;
+      }
+    }
 
     // Edge geometry (length in metres), each junction's rain multiplier, and
     // the plain it floods onto past the curb. Half of every incident edge
@@ -188,6 +249,55 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
       }
     }
 
+    // Adjacency with edge ids, so a junction's live outflow can be read off
+    // the per-edge transfers: which neighbour the water is actually heading
+    // to this step, as opposed to the terrain's steepest descent.
+    const adjOffset = new Int32Array(nodeCount + 1);
+    const adjNode = new Int32Array(edgeCount * 2);
+    const adjEdge = new Int32Array(edgeCount * 2);
+    {
+      for (let e = 0; e < edgeCount; e += 1) {
+        adjOffset[edges[2 * e] + 1] += 1;
+        adjOffset[edges[2 * e + 1] + 1] += 1;
+      }
+      for (let n = 0; n < nodeCount; n += 1) {
+        adjOffset[n + 1] += adjOffset[n];
+      }
+      const cursor = adjOffset.slice(0, nodeCount);
+      for (let e = 0; e < edgeCount; e += 1) {
+        const a = edges[2 * e];
+        const b = edges[2 * e + 1];
+        adjNode[cursor[a]] = b;
+        adjEdge[cursor[a]] = e;
+        cursor[a] += 1;
+        adjNode[cursor[b]] = a;
+        adjEdge[cursor[b]] = e;
+        cursor[b] += 1;
+      }
+    }
+    const edgeRate = new Float64Array(edgeCount); // m3/s over the last step, + is a->b
+    const liveDown = new Int32Array(nodeCount).fill(-1);
+
+    // Where each wet junction's water is going right now: the neighbour it
+    // sent the most to over the last step, or -1 when it stood still.
+    function refreshLiveDownstream(minDepth) {
+      for (let n = 0; n < nodeCount; n += 1) {
+        liveDown[n] = -1;
+        if (depthCache[n] < minDepth) {
+          continue;
+        }
+        let best = 0;
+        for (let k = adjOffset[n]; k < adjOffset[n + 1]; k += 1) {
+          const e = adjEdge[k];
+          const out = edges[2 * e] === n ? edgeRate[e] : -edgeRate[e];
+          if (out > best) {
+            best = out;
+            liveDown[n] = adjNode[k];
+          }
+        }
+      }
+    }
+
     // The stage-storage curve, volume -> standing depth.
     function depthOf(volume, n) {
       return volume <= CURB_VOL_M3
@@ -213,8 +323,13 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     let peak = 0;
     let pipes = null;
     let rainedM3 = 0;
-    let drainedM3 = 0;
-    let dischargedM3 = 0;
+    let drainedM3 = 0; // the generic drain term, outside the surveyed network
+    let infiltratedM3 = 0;
+    let capturedM3 = 0; // taken down the inlets into the pipes
+    let dischargedM3 = 0; // out through the street outfalls
+    let backflowM3 = 0; // in from the sea through drowned outfalls
+    let spilledInM3 = 0; // surcharged out of manholes onto the streets
+    let driedFilmM3 = 0; // the last damp film snapped to dry, so the balance closes
 
     // Junctions bucketed by ~100 m cells for point queries; built on the
     // first lookup rather than at load, since most sessions never click.
@@ -255,19 +370,53 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
         volM3.fill(0);
         depthCache.fill(0);
         flowM3.fill(0);
+        wetSince.fill(-1);
+        simSeconds = 0;
         peak = 0;
         rainedM3 = 0;
         drainedM3 = 0;
+        infiltratedM3 = 0;
+        capturedM3 = 0;
         dischargedM3 = 0;
+        backflowM3 = 0;
+        spilledInM3 = 0;
+        driedFilmM3 = 0;
       },
 
       /**
-       * Couple the street model to the underground pipes. Junctions with an
-       * inlet stop using the street-drain capacity: the pipe becomes their
-       * only way down, so a full pipe visibly backs the street up.
+       * Couple the street model to the underground drainage (pipeNetwork.js).
+       * Its inlets become the only way down for the streets it covers, so a
+       * surcharged network visibly backs the street up; outside its reach
+       * the generic drain term stays.
        */
-      attachPipes(pipeSimulation) {
-        pipes = pipeSimulation;
+      attachPipes(pipeNetwork) {
+        pipes = pipeNetwork;
+      },
+
+      /** Sea level (metres MSL) the coastal dead ends drain against. */
+      setSeaLevel(metres) {
+        seaLevelM = Number.isFinite(metres) ? metres : -Infinity;
+      },
+
+      get seaLevelM() {
+        return seaLevelM;
+      },
+
+      /** Water arriving on a junction from outside the routing - a manhole spilling. */
+      addWater(n, m3) {
+        if (m3 > 0 && n >= 0 && n < nodeCount) {
+          volM3[n] += m3;
+          spilledInM3 += m3;
+        }
+      },
+
+      /** Standing depth per junction, metres. Read-only view for the ensemble. */
+      get depths() {
+        return depthCache;
+      },
+
+      get simSeconds() {
+        return simSeconds;
       },
 
       /** Water balance in m3, for probes and conservation checks. */
@@ -280,7 +429,14 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
           storedM3: stored,
           rainedM3,
           drainedM3,
-          dischargedM3
+          infiltratedM3,
+          capturedM3,
+          dischargedM3,
+          backflowM3,
+          spilledInM3,
+          driedFilmM3,
+          seaOutfalls: seaOutfallCount,
+          seaLevelM
         };
       },
 
@@ -302,21 +458,36 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
           }
         }
 
-        // Inlets: junctions near a pipe hand water down, but only as much as
-        // the pipe has room for.
+        // Inlets: every grated cover takes the street's water down at the
+        // rate its grate passes (a weir at shallow depths, an orifice once
+        // drowned - hydraulics.js), and only as much as the manhole below
+        // has room for. A surcharged network refuses it, and the street
+        // stays wet: that is how a full trunk shows on the surface.
         if (pipes) {
-          const intake = 1 - Math.exp(-dtSeconds / config.pipeInletTauSeconds);
-          const { inletNode } = pipes;
+          const { count, street, node, perimeterM, openAreaM2 } = pipes.inlets;
+          const clogging = config.inletClogging;
 
-          for (let n = 0; n < nodeCount; n += 1) {
-            const pipeIndex = inletNode[n];
-            if (pipeIndex < 0 || volM3[n] <= 0) {
+          for (let k = 0; k < count; k += 1) {
+            const s = street[k];
+            const volume = volM3[s];
+            if (volume <= 0) {
+              continue;
+            }
+            const depth = depthOf(volume, s);
+            if (depth < MIN_FLOW_DEPTH) {
               continue;
             }
 
-            const acceptedM3 = pipes.offer(pipeIndex, volM3[n] * intake);
+            let wanted =
+              inletCapture({ depthM: depth, perimeterM: perimeterM[k], openAreaM2: openAreaM2[k], clogging }) *
+              dtSeconds;
+            if (wanted > volume) {
+              wanted = volume;
+            }
+            const acceptedM3 = pipes.offer(node[k], wanted);
             if (acceptedM3 > 0) {
-              volM3[n] -= acceptedM3;
+              volM3[s] -= acceptedM3;
+              capturedM3 += acceptedM3;
             }
           }
         }
@@ -332,6 +503,7 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
         const drainRate = config.streetDrainMmPerHour / 3.6e6; // m per second
 
         flowM3.fill(0);
+        edgeRate.fill(0);
 
         for (let pass = 0; pass < substeps; pass += 1) {
           // Standing depths for this substep, from the frozen volumes.
@@ -342,6 +514,7 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
 
           proposedOut.fill(0);
           terminalQ.fill(0);
+          seaInflow.fill(0);
           edgeFlow.fill(0);
 
           // Phase 1: propose a transfer on every edge from the frozen state.
@@ -405,19 +578,61 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
             proposedOut[src] += transferM3;
           }
 
-          // Terminal junctions are the network's outfalls (sea, canals, roads
-          // beyond the study area): they discharge over a nominal edge whose
-          // far side is always lower.
+          // Terminal junctions are the network's outfalls. A dead end that
+          // meets the sea discharges over a nominal edge to the TIDE level:
+          // the higher the tide, the less head, until a drowned outfall
+          // stops - and the sea flows the other way onto the street. Other
+          // dead ends (canals, roads beyond the study area) discharge over a
+          // nominal edge whose far side is always lower.
           for (let n = 0; n < nodeCount; n += 1) {
+            if (downstream[n] >= 0) {
+              continue;
+            }
             const available = depthCache[n];
-            if (available < MIN_FLOW_DEPTH || downstream[n] >= 0) {
+            const sea = seaOutfall[n] === 1 && seaLevelM > -Infinity;
+
+            if (sea && seaLevelM > elev[n] + available + 1e-4) {
+              // Drowned: the sea stands above the street water here, so it
+              // comes in, at Manning's rate for the depth it covers the
+              // street to, and never past a quarter of the way to level.
+              const head = seaLevelM - elev[n] - available;
+              const seaDepth = seaLevelM - elev[n];
+              let velocity = manningK * Math.cbrt(seaDepth * seaDepth) * Math.sqrt(head / OUTFALL_LEN);
+              if (velocity > vMax) {
+                velocity = vMax;
+              }
+              let fraction = (velocity * dtSub) / OUTFALL_LEN;
+              if (fraction > 1) {
+                fraction = 1;
+              }
+              let transfer = seaDepth * fraction;
+              if (transfer > head * 0.25) {
+                transfer = head * 0.25;
+              }
+              seaInflow[n] = transfer * PATCH_M2;
               continue;
             }
 
-            let velocity =
-              manningK *
-              Math.cbrt(available * available) *
-              Math.sqrt(MIN_SLOPE + available / OUTFALL_LEN);
+            if (available < MIN_FLOW_DEPTH) {
+              continue;
+            }
+
+            let velocity;
+            let cap = Infinity;
+            if (sea) {
+              const receiving = Math.max(seaLevelM, elev[n] - OUTFALL_DROP_M);
+              const head = elev[n] + available - receiving;
+              if (head <= 1e-6) {
+                continue;
+              }
+              velocity = manningK * Math.cbrt(available * available) * Math.sqrt(head / OUTFALL_LEN);
+              cap = head * 0.25;
+            } else {
+              velocity =
+                manningK *
+                Math.cbrt(available * available) *
+                Math.sqrt(MIN_SLOPE + available / OUTFALL_LEN);
+            }
             if (velocity > vMax) {
               velocity = vMax;
             }
@@ -427,7 +642,11 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
               fraction = 1;
             }
 
-            const transferM3 = available * fraction * PATCH_M2;
+            let transfer = available * fraction;
+            if (transfer > cap) {
+              transfer = cap;
+            }
+            const transferM3 = transfer * PATCH_M2;
             terminalQ[n] = transferM3;
             proposedOut[n] += transferM3;
           }
@@ -452,6 +671,7 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
             delta[src] -= moved;
             delta[tgt] += moved;
             flowM3[src] += moved;
+            edgeRate[e] += flow > 0 ? moved : -moved;
           }
 
           for (let n = 0; n < nodeCount; n += 1) {
@@ -462,10 +682,17 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
               dischargedM3 += moved;
               flowM3[n] += moved;
             }
+            const inflow = seaInflow[n];
+            if (inflow > 0) {
+              delta[n] += inflow;
+              backflowM3 += inflow;
+              flowM3[n] += inflow;
+            }
           }
 
-          // Phase 4: apply, drain, and keep the state sane. Junctions served
-          // by a pipe inlet drain through the pipe alone.
+          // Phase 4: apply, absorb, and keep the state sane. Soakage takes
+          // its share everywhere the ground is wet; the generic drain term
+          // only where no surveyed inlets exist (the inlets ran above).
           for (let n = 0; n < nodeCount; n += 1) {
             if (volM3[n] === 0 && delta[n] === 0) {
               continue;
@@ -473,29 +700,61 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
 
             let next = volM3[n] + delta[n];
 
-            if (next > 0 && (!pipes || pipes.inletNode[n] < 0)) {
-              const area = next <= CURB_VOL_M3 ? PATCH_M2 : floodAreaM2[n];
-              let drainedNow = drainRate * dtSub * area;
-              if (drainedNow > next) {
-                drainedNow = next;
+            if (next > 0) {
+              const spread = next > CURB_VOL_M3;
+              const area = spread ? floodAreaM2[n] : PATCH_M2;
+
+              if (wetSince[n] < 0) {
+                wetSince[n] = simSeconds;
               }
-              next -= drainedNow;
-              drainedM3 += drainedNow;
+              const pervious = spread ? config.perviousStripFraction : config.perviousStreetFraction;
+              if (pervious > 0) {
+                const rate = hortonRate({
+                  f0: infiltration.f0,
+                  fc: infiltration.fc,
+                  k: infiltration.k,
+                  wetSeconds: simSeconds - wetSince[n]
+                });
+                let soaked = rate * pervious * area * dtSub;
+                if (soaked > next) {
+                  soaked = next;
+                }
+                next -= soaked;
+                infiltratedM3 += soaked;
+              }
+
+              if (next > 0 && (!pipes || !pipes.covered || pipes.covered[n] === 0)) {
+                let drainedNow = drainRate * dtSub * area;
+                if (drainedNow > next) {
+                  drainedNow = next;
+                }
+                next -= drainedNow;
+                drainedM3 += drainedNow;
+              }
             }
 
             // One comparison catches negatives, NaN and the last damp film.
             if (!(next > SNAP_DRY_M3)) {
+              if (next > 0) {
+                driedFilmM3 += next;
+              }
               next = 0;
+              wetSince[n] = -1;
             }
 
             volM3[n] = next;
           }
+
+          simSeconds += dtSub;
         }
 
         // Final standing depths for rendering and probes, and flow as a rate.
         refreshDepths();
         for (let n = 0; n < nodeCount; n += 1) {
           flowM3[n] /= dtSeconds;
+        }
+        for (let e = 0; e < edgeCount; e += 1) {
+          edgeRate[e] /= dtSeconds;
         }
       },
 
@@ -578,16 +837,29 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
           return;
         }
 
+        // Chains follow the LIVE flow - the neighbour each junction actually
+        // sent water to - so a backed-up street shows its water heading
+        // upstream, and a trunk shows it racing down. Water standing still
+        // ends a chain; a pool with no through-flow is the Ponding layer's.
+        refreshLiveDownstream(stops[0]);
         rebuild(
           depthCache,
           stops[0],
           (value, flowRate) =>
             `Flooding ~${(value * 100).toFixed(0)} cm deep (${SEVERITY[classOf(value)]})` +
-            (flowRate > 0.05 ? `<br>~${flowRate.toFixed(1)} m³/s flowing through` : ''),
+            (flowRate > 0.05 ? `<br>~${flowRate.toFixed(1)} m³/s flowing through` : '<br>standing still'),
           classOf,
-          flowM3
+          flowM3,
+          liveDown
         );
-      }
+      },
+
+      // What the Ponding layer paints from: depth per junction and the area
+      // each junction's water spreads over.
+      floodAreaM2,
+      patchAreaM2: PATCH_M2,
+      curbDepthM: CURB_M,
+      depthStops: stops
     };
   }
 
@@ -609,8 +881,36 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
 
     dynamic,
 
-    // Raw graph coordinates, so the pipe model can map inlets onto junctions.
-    graph: { nodeCount, lat, lng },
+    // The graph as the water model sees it - coordinates and the despiked
+    // heights - so the pipe network can sit its manholes under the streets.
+    graph: { nodeCount, lat, lng, elev },
+
+    /**
+     * Paint an ensemble result: how often each junction flooded deeper than
+     * the threshold across the members, 0..1. Fixed colour stops, so 20%
+     * always looks the same.
+     */
+    renderProbability(probability, { members = 0, thresholdM = 0.05 } = {}) {
+      const stops = [0.05, 0.2, 0.4, 0.6, 0.8];
+      const classOf = (value) => {
+        let cls = 0;
+        for (let index = 1; index < stops.length; index += 1) {
+          if (value >= stops[index]) {
+            cls = index;
+          }
+        }
+        return cls;
+      };
+      rebuild(
+        probability,
+        stops[0],
+        (value) =>
+          `Flood chance: ${Math.round(value * 100)}%` +
+          (members ? ` (${Math.round(value * members)} of ${members} runs)` : '') +
+          `<br>deeper than ${Math.round(thresholdM * 100)} cm at some point`,
+        classOf
+      );
+    },
 
     /** Shift + tick: classic dashed rendering instead of stream particles. */
     setClassic(flag) {

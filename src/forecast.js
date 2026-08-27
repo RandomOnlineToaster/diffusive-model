@@ -1,5 +1,6 @@
 import L from 'leaflet';
 import { config } from './config.js';
+import { alignSeries } from './forecastAxis.js';
 
 
 // Gridded rainfall forecast, from whichever provider is available.
@@ -154,25 +155,23 @@ async function loadTmdGrid(rawBounds) {
     throw new Error('TMD grid returned no locations');
   }
 
-  const times = [];
-  const points = locations
+  // Each point answers its own series, and a series can skip an hour, so the
+  // time axis is the union of every stamp and each point is aligned to it
+  // (forecastAxis.js) rather than read off by slot index.
+  const raw = locations
     .map((entry) => {
       const location = entry.location || entry;
       const series = entry.forecasts || entry.forecast || [];
-      const rain = [];
-
-      for (let index = 0; index < series.length; index += 1) {
-        const slot = series[index];
-        const stamp = slot.time || slot.datetime;
-        if (times.length <= index && stamp) {
-          times.push(stamp);
-        }
-        rain.push(Number(slot.data?.rain ?? slot.rain ?? 0));
-      }
-
-      return { lat: Number(location.lat), lng: Number(location.lon ?? location.lng), rain };
+      return {
+        lat: Number(location.lat),
+        lng: Number(location.lon ?? location.lng),
+        stamps: series.map((slot) => slot.time || slot.datetime),
+        values: series.map((slot) => Number(slot.data?.rain ?? slot.rain ?? 0))
+      };
     })
     .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng));
+  const { times, rows } = alignSeries(raw);
+  const points = raw.map((point, index) => ({ lat: point.lat, lng: point.lng, rain: rows[index] }));
 
   // TMD's own docs warn that a wide box pulls a lot of data: the province at
   // 3 km is on the order of ten thousand points, which is more rectangles

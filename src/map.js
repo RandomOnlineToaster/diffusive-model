@@ -19,12 +19,12 @@ import {
 } from './flow.js';
 import { createFlowParticleLayer, setChainDetail } from './flowParticles.js';
 import {
-  createPipeNetworkLayer,
   createRiverLayer,
   createSensorStationLayer,
   createWaterBodyLayer,
   createWaterGateLayer
 } from './infrastructure.js';
+import { createPondingLayer } from './ponding.js';
 import {
   createBoundaryMask,
   createMaskTest,
@@ -32,8 +32,12 @@ import {
   dilateMask
 } from './boundary.js';
 import { createBaseMaps, MAX_ZOOM } from './basemaps.js';
+import { createDrainagePipeLayer, createDrainageCoverLayer } from './drainage.js';
 import { createRoadFlowLayer } from './roadFlow.js';
-import { createPipeSimulation } from './pipeSim.js';
+import { createPipeNetwork, loadDrainageModel, NODE_SEA_OUTFALL } from './pipeNetwork.js';
+import { createTideSource } from './tide.js';
+import { createWindSource } from './wind.js';
+import { createEnsembleRunner } from './ensemble.js';
 import { createRainfallSimulator } from './rainfallSim.js';
 import {
   createCloudLayer,
@@ -114,16 +118,42 @@ export async function initializeMap() {
   const contourLayer = createContourLayer(contourLines, chonburiBoundary);
   // One rasterised boundary test shared by every OSM layer.
   const isInsideProvince = config.clipRivers ? createPointInsideTest(chonburiBoundary) : null;
-  const [rivers, waterGates, waterBodies, pipeNetwork, tunnelSensors, poleSensors, roadFlow] =
-    await Promise.all([
-      createRiverLayer({ isInside: isInsideProvince }),
-      createWaterGateLayer({ isInside: isInsideProvince }),
-      createWaterBodyLayer({ isInside: isInsideProvince }),
-      createPipeNetworkLayer(),
-      createSensorStationLayer({ sensorType: 'TUNNEL' }),
-      createSensorStationLayer({ sensorType: 'ROAD' }),
-      createRoadFlowLayer()
-    ]);
+  const [
+    rivers,
+    waterGates,
+    waterBodies,
+    drainagePipes,
+    tunnelSensors,
+    poleSensors,
+    roadFlow
+  ] = await Promise.all([
+    createRiverLayer({ isInside: isInsideProvince }),
+    createWaterGateLayer({ isInside: isInsideProvince }),
+    createWaterBodyLayer({ isInside: isInsideProvince }),
+    createDrainagePipeLayer({ isInside: isInsideProvince }),
+    createSensorStationLayer({ sensorType: 'TUNNEL' }),
+    createSensorStationLayer({ sensorType: 'ROAD' }),
+    createRoadFlowLayer()
+  ]);
+  // The 80k covers load on first use, not now, so this is only the layer shell.
+  const drainageCovers = createDrainageCoverLayer({ isInside: isInsideProvince });
+
+  // What the drainage physics runs on: the surveyed pipe graph, the sea level
+  // its outfalls meet, and the wind that steers storm cells. All keyless and
+  // all optional - each reports itself unavailable rather than failing the
+  // map. The tide is read a little offshore of the street network, the wind
+  // at its centre.
+  const streetBounds = streetGraphBounds(roadFlow.graph);
+  const midLat = streetBounds ? (streetBounds.south + streetBounds.north) / 2 : 12.93;
+  const [drainageModel, tide, wind] = await Promise.all([
+    config.enableDrainageModel ? loadDrainageModel() : Promise.resolve(null),
+    createTideSource({ lat: midLat, lng: streetBounds ? streetBounds.west - 0.03 : 100.87 }),
+    createWindSource({
+      lat: midLat,
+      lng: streetBounds ? (streetBounds.west + streetBounds.east) / 2 : 100.9
+    })
+  ]);
+  tide.setOffset(config.tideSurgeM);
 
   // Live weather: satellite tiles need no fetch, the TMD forecast does.
   const cloudCover = createCloudLayer({ bounds: dem.bounds });
@@ -141,45 +171,81 @@ export async function initializeMap() {
   cloudCover.updateBlur(map.getZoom());
   map.on('zoomend', () => cloudCover.updateBlur(map.getZoom()));
 
-  // Couple streets to the underground pipes wherever both networks exist.
-  // Behind a flag until the pipe database carries real cross-sections and
-  // invert levels; until then streets rely on the generic drain term.
-  let pipeSim = null;
-  if (config.enablePipeDrainage && pipeNetwork.features?.length && roadFlow.dynamic && roadFlow.graph) {
-    pipeSim = createPipeSimulation({ features: pipeNetwork.features, streets: roadFlow.graph });
-    roadFlow.dynamic.attachPipes(pipeSim);
+  // The drainage network under the streets (pipeNetwork.js): grated inlets
+  // take street water down, the surveyed pipes carry it by Manning's law,
+  // outfalls discharge against the tide, pump stations lift it out, and a
+  // manhole filled to its lid spills back onto the street above it.
+  let pipeNet = null;
+  if (drainageModel && roadFlow.dynamic && roadFlow.graph) {
+    pipeNet = createPipeNetwork({
+      model: drainageModel,
+      streets: roadFlow.graph,
+      onSpill: (streetIndex, m3) => roadFlow.dynamic.addWater(streetIndex, m3)
+    });
+    roadFlow.dynamic.attachPipes(pipeNet);
+    const s = pipeNet.stats;
     console.info(
-      `Pipe model: ${pipeSim.stats.pipeNodes} nodes, ${pipeSim.stats.inletCount.toLocaleString()} ` +
-        `street inlets, ${pipeSim.stats.capacityM3.toLocaleString()} m³ capacity`
+      `Drainage model: ${s.nodes.toLocaleString()} junctions, ${s.conduits.toLocaleString()} conduits, ` +
+        `${s.inlets.toLocaleString()} inlets, ${s.pumps} pump stations, ${s.seaOutfalls} sea + ` +
+        `${s.freeOutfalls} free outfalls, ${s.capacityM3.toLocaleString()} m³ capacity; ` +
+        `${s.coveredStreets.toLocaleString()} street junctions covered`
     );
+  } else {
+    console.info('Drainage model: off (no drainage-model.json or disabled); streets use the generic drain term');
   }
 
-  // Recolour each pipe segment by its worst fill fraction while raining.
+  // Standing water as pools: each wet junction's depth painted over the area
+  // it has spread to, so low ground reads as a pond rather than a thin line.
+  const pondingLayer = roadFlow.dynamic
+    ? createPondingLayer({
+        lat: roadFlow.graph.lat,
+        lng: roadFlow.graph.lng,
+        depths: roadFlow.dynamic.depths,
+        floodAreaM2: roadFlow.dynamic.floodAreaM2,
+        patchAreaM2: roadFlow.dynamic.patchAreaM2,
+        curbDepthM: roadFlow.dynamic.curbDepthM,
+        stops: roadFlow.dynamic.depthStops
+      })
+    : L.layerGroup([]);
+  console.info(
+    `Sea level: ${tide.source}` +
+      (tide.range ? ` (${tide.range.minM.toFixed(2)} to +${tide.range.maxM.toFixed(2)} m this week)` : '') +
+      `; wind: ${wind.source}`
+  );
+
+  // Recolour each surveyed drain run by how full it is while raining, and
+  // put the survey colours back afterwards.
   const PIPE_FILL_COLORS = ['#60a5fa', '#22c55e', '#eab308', '#f97316', '#dc2626'];
+  let pipesRecoloured = false;
   function recolorPipes() {
-    if (!pipeSim) {
+    if (!pipeNet || !drainagePipes.featureLayers) {
       return;
     }
 
-    const fills = pipeSim.fillBySegment();
-    for (const [segmentId, featureLayer] of pipeNetwork.featureLayers) {
-      const fraction = fills.get(segmentId) || 0;
-      const cls = Math.min(
-        PIPE_FILL_COLORS.length - 1,
-        Math.floor(fraction * PIPE_FILL_COLORS.length)
-      );
+    const fills = pipeNet.fillByFeature();
+    for (const [id, featureLayer] of drainagePipes.featureLayers) {
+      const fraction = fills[id];
+      if (!(fraction > 0.02)) {
+        if (pipesRecoloured) {
+          featureLayer.setStyle(drainagePipes.baseStyle(featureLayer.feature));
+        }
+        continue;
+      }
+      const cls = Math.min(PIPE_FILL_COLORS.length - 1, Math.floor(fraction * PIPE_FILL_COLORS.length));
       featureLayer.setStyle({ color: PIPE_FILL_COLORS[cls] });
     }
+    pipesRecoloured = true;
   }
 
   function restorePipeStyles() {
-    if (!pipeSim) {
+    if (!pipesRecoloured || !drainagePipes.featureLayers) {
       return;
     }
 
-    for (const featureLayer of pipeNetwork.featureLayers.values()) {
-      featureLayer.setStyle(pipeNetwork.baseStyle(featureLayer.feature));
+    for (const featureLayer of drainagePipes.featureLayers.values()) {
+      featureLayer.setStyle(drainagePipes.baseStyle(featureLayer.feature));
     }
+    pipesRecoloured = false;
   }
 
   if (roadFlow.stats) {
@@ -233,7 +299,9 @@ export async function initializeMap() {
   const demLabel = (text) => (usingPlaceholderDEM ? placeholderLabel(text) : text);
   const elevationLayerLabel = demLabel('Elevation');
   const flowDirectionLabel = demLabel('Flow Direction');
-  const flowAccumulationLabel = demLabel('Flow Accumulation');
+  // "Flow accumulation" is the GIS term for upstream contributing area - where
+  // flow CONVERGES, not where water stands - so the menu says so.
+  const flowAccumulationLabel = demLabel('Catchment (flow accumulation)');
   const flowPathLabel = demLabel('Flow Paths');
   const contourLayerLabel = demLabel('Elevation Contours');
 
@@ -247,7 +315,13 @@ export async function initializeMap() {
       [rivers.label]: rivers.layer,
       [waterBodies.label]: waterBodies.layer,
       [waterGates.label]: waterGates.layer,
-      [wipLabel(pipeNetwork.label)]: pipeNetwork.layer,
+      // The surveyed drainage network from the city's GIS geodatabase: the
+      // gravity pipes and the manhole/inlet covers, as two separate layers.
+      // The covers paint only when zoomed in and load on first use, so the
+      // menu can offer them without the map carrying 80k markers up front.
+      [drainagePipes.available ? drainagePipes.label : wipLabel(drainagePipes.label)]:
+        drainagePipes.layer,
+      [drainageCovers.label]: drainageCovers.layer,
       [tunnelSensors.label]: tunnelSensors.layer,
       [poleSensors.label]: poleSensors.layer
     },
@@ -301,7 +375,12 @@ export async function initializeMap() {
 
     // Where street water can exist at all, measured from the graph itself
     // rather than assumed from the build-time bbox.
-    streetCoverage: streetGraphBounds(roadFlow.graph),
+    streetCoverage: streetBounds,
+
+    // A newly placed storm drifts with the forecast steering wind at the
+    // moment on the scenario's clock; its sliders can override it.
+    defaultVelocity: () =>
+      config.stormFollowsWind && wind.available ? wind.steeringVelocityAt(rainfall.scenarioTimeMs) : null,
 
     // Every simulation tick advances the street water: rain lands at the
     // current intensity and the water crawls downstream at street-flow speed.
@@ -319,8 +398,16 @@ export async function initializeMap() {
       // still raining and the grid is still advancing, so the street water
       // and the "Water on map" readout must advance with them. Only the
       // drawing below is gated on the layer being visible.
+      //
+      // The sea stands at the tide for this moment on the scenario's clock;
+      // streets drain first (rain, inlets, soakage, outfalls), then the
+      // pipes carry what came down and spill what they cannot hold back up.
+      const seaLevelM = tide.levelAt(rainfall.scenarioTimeMs);
+      roadFlow.dynamic.setSeaLevel(seaLevelM);
+      pipeNet?.setSeaLevel(seaLevelM);
       roadFlow.dynamic.step((lat, lng) => rainfall.intensityAt(lat, lng), dtSeconds);
-      pipeSim?.step(dtSeconds);
+      pipeNet?.step(dtSeconds);
+      updateDrainageReadout();
 
       if (!rainLayerActive) {
         return;
@@ -340,7 +427,10 @@ export async function initializeMap() {
             const cost = performance.now() - started;
             streetRenderDelay = Math.min(6000, Math.max(STREET_RENDER_MS, cost * 6));
           }
-          if (map.hasLayer(pipeNetwork.layer)) {
+          if (rainLayerActive && map.hasLayer(pondingLayer)) {
+            pondingLayer.update?.();
+          }
+          if (map.hasLayer(drainagePipes.layer)) {
             recolorPipes();
           }
         }, streetRenderDelay);
@@ -354,10 +444,162 @@ export async function initializeMap() {
           roadFlow.dynamic.render();
         }
       }
-      pipeSim?.reset();
+      pipeNet?.reset();
       restorePipeStyles();
+      pondingLayer.update?.();
       refreshSamplePopup();
+      updateDrainageReadout();
     }
+  });
+
+  // --- drainage readouts, surge slider and the ensemble -----------------------
+  //
+  // The panel tiles under the storm readouts: the sea level the outfalls
+  // meet, the wind steering new storms, water held in the pipes, and water
+  // the ground and generic drains have taken. Hover a tile for the detail.
+  const drainDom = {
+    sea: document.querySelector('#sim-sea'),
+    wind: document.querySelector('#sim-wind'),
+    drains: document.querySelector('#sim-drains'),
+    absorbed: document.querySelector('#sim-absorbed'),
+    surge: document.querySelector('#sim-surge'),
+    surgeValue: document.querySelector('#sim-surge-value'),
+    ensemble: document.querySelector('#sim-ensemble'),
+    status: document.querySelector('#sim-ensemble-status')
+  };
+  const cubic = (value) => `${Math.round(value).toLocaleString()} m³`;
+
+  function updateDrainageReadout() {
+    const nowMs = rainfall.scenarioTimeMs;
+    const level = tide.levelAt(nowMs);
+    drainDom.sea.textContent = `${level >= 0 ? '+' : '−'}${Math.abs(level).toFixed(2)} m`;
+    drainDom.sea.title =
+      `Sea level at the outfalls, metres above mean sea level: ${tide.source}` +
+      (tide.isSyntheticAt(nowMs) && tide.available ? ' (outside the forecast window: synthetic tide)' : '') +
+      (tide.offsetM ? `, plus ${tide.offsetM.toFixed(1)} m surge` : '');
+
+    const sample = wind.windAt(nowMs);
+    if (sample) {
+      drainDom.wind.textContent = `${(sample.speedMs * 3.6).toFixed(0)} km/h from ${Math.round(sample.directionDeg)}°`;
+      const steer = wind.steeringVelocityAt(nowMs);
+      drainDom.wind.title =
+        `Surface wind, gusting ${(sample.gustMs * 3.6).toFixed(0)} km/h, ${sample.pressureHpa.toFixed(0)} hPa. ` +
+        (steer
+          ? `New storms drift towards ${Math.round(steer.bearingDeg)}° at ${steer.speedMs.toFixed(1)} m/s ` +
+            `(${sample.steeringFromAloft ? '850 hPa' : 'scaled 10 m'} steering wind).`
+          : '');
+    } else {
+      drainDom.wind.textContent = 'no data';
+      drainDom.wind.title = 'Wind forecast unavailable; new storms start parked.';
+    }
+
+    if (pipeNet) {
+      const t = pipeNet.totals();
+      drainDom.drains.textContent = cubic(t.storedM3);
+      drainDom.drains.title =
+        `Water in the surveyed pipes now. ${t.surchargedNodes.toLocaleString()} manholes surcharged, ` +
+        `${t.pumpsRunning} pump stations running (${cubic(t.pumpedM3)} pumped so far), ` +
+        `${cubic(t.dischargedM3)} out through the outfalls, ${cubic(t.backflowM3)} in from the sea, ` +
+        `${cubic(t.spilledM3)} spilled back onto the streets.`;
+    } else {
+      drainDom.drains.textContent = 'no model';
+      drainDom.drains.title = 'Run `npm run build:drainage` to build the pipe network.';
+    }
+
+    const s = roadFlow.dynamic?.totals();
+    if (s) {
+      drainDom.absorbed.textContent = cubic(s.infiltratedM3 + s.drainedM3);
+      drainDom.absorbed.title =
+        `${cubic(s.infiltratedM3)} soaked into the ground, ${cubic(s.drainedM3)} down generic drains ` +
+        `outside the surveyed network, ${cubic(s.capturedM3)} down the inlets, ` +
+        `${cubic(s.dischargedM3)} out through ${s.seaOutfalls.toLocaleString()} sea and other street outfalls, ` +
+        `${cubic(s.backflowM3)} in from the sea over the streets.`;
+    }
+  }
+
+  drainDom.surge.value = String(config.tideSurgeM);
+  const showSurge = () => {
+    const value = Number(drainDom.surge.value);
+    drainDom.surgeValue.textContent = `${value >= 0 ? '+' : '−'}${Math.abs(value).toFixed(1)} m`;
+  };
+  drainDom.surge.addEventListener('input', () => {
+    tide.setOffset(Number(drainDom.surge.value));
+    showSurge();
+    updateDrainageReadout();
+  });
+  showSurge();
+  updateDrainageReadout();
+
+  // The ensemble replays the placed storms with jittered tracks and paints
+  // how often each street floods. It runs on the same models, one member
+  // at a time, so the button doubles as Cancel while it works.
+  const ensemble = createEnsembleRunner({
+    rainfall,
+    streets: roadFlow.dynamic,
+    pipes: pipeNet,
+    seaLevelAt: (simSeconds) => tide.levelAt(rainfall.scenarioTimeAt(simSeconds)),
+    onProgress: (done, total) => {
+      drainDom.status.textContent = `Running ensemble: ${done} of ${total} members done…`;
+    }
+  });
+
+  function showEnsembleStatus(text) {
+    drainDom.status.hidden = !text;
+    drainDom.status.textContent = text || '';
+  }
+
+  drainDom.ensemble.addEventListener('click', async () => {
+    if (!roadFlow.dynamic) {
+      return;
+    }
+    if (ensemble.running) {
+      ensemble.cancel();
+      return;
+    }
+    if (rainfall.stormSystem.storms.length === 0) {
+      showEnsembleStatus('Place a storm first: the ensemble replays the placed storms with jittered tracks, speeds, sizes and intensities.');
+      return;
+    }
+
+    // A forecast span would keep re-raining the grid underneath the runs.
+    if (forecastRain?.active) {
+      forecastRain.end();
+    }
+    rainfall.stop();
+    drainDom.ensemble.textContent = 'Cancel';
+    drainDom.ensemble.classList.add('sim-button--active');
+    showEnsembleStatus('Running ensemble…');
+
+    let result = null;
+    try {
+      result = await ensemble.run();
+    } finally {
+      drainDom.ensemble.textContent = 'Run ensemble';
+      drainDom.ensemble.classList.remove('sim-button--active');
+    }
+
+    rainfall.render();
+    updateDrainageReadout();
+    if (!result) {
+      showEnsembleStatus('Ensemble cancelled.');
+      return;
+    }
+
+    // The street layer has to be on to show it; adding it repaints the
+    // (now dry) live view, so the probability is painted after that.
+    if (!map.hasLayer(roadFlow.layer)) {
+      roadFlow.layer.addTo(map);
+    }
+    roadFlow.renderProbability(result.probability, {
+      members: result.members,
+      thresholdM: result.thresholdM
+    });
+    const hours = result.durationS / 3600;
+    showEnsembleStatus(
+      `${result.members} runs over ${hours % 1 ? hours.toFixed(1) : hours} h: ` +
+        `${result.floodedJunctions.toLocaleString()} street points flood deeper than ` +
+        `${Math.round(result.thresholdM * 100)} cm in at least one. Hover a street for its chance; Play or Reset clears it.`
+    );
   });
 
   // --- rainfall-driven flow -------------------------------------------------
@@ -524,6 +766,10 @@ export async function initializeMap() {
       roadFlow.setClassic?.(shiftTick);
     }
 
+    if (event.layer === pondingLayer) {
+      pondingLayer.update?.();
+    }
+
     if (event.layer === rainfall.layer) {
       rainLayerActive = true;
       applyFlowWeighting();
@@ -572,6 +818,7 @@ export async function initializeMap() {
       [flowDirectionLabel]: flowDirectionLayer,
       [flowPathLabel]: flowPathLayer,
       [wipLabel(roadFlow.label)]: roadFlow.layer,
+      Ponding: pondingLayer,
       [flowAccumulationLabel]: flowAccumulationLayer
     },
     { collapsed: false }
@@ -603,6 +850,17 @@ export async function initializeMap() {
   matchLayerControlWidths();
   labelLayerControl(geographyControl, 'Geography');
   labelLayerControl(simulationControl, 'Water Simulation');
+  hintLayerToggle(geographyControl, drainageCovers.layer, 'Zoom in to street level to see the covers');
+  hintLayerToggle(
+    simulationControl,
+    flowAccumulationLayer,
+    'Upstream area draining through each cell: where flow converges, not where water stands. Ponding shows standing water.'
+  );
+  hintLayerToggle(
+    simulationControl,
+    pondingLayer,
+    'Standing water while it rains, as a blue sheet under the streets: each wet junction painted over the ground it has spread to, darker the deeper'
+  );
   hintClassicToggle(simulationControl, [flowDirectionLayer, flowPathLayer, roadFlow.layer]);
 
   // Flow detail: how much of the network Flow Paths and Street Flow draw, in
@@ -697,6 +955,21 @@ export async function initializeMap() {
       lines.push('Street water: none within 60 m');
     }
 
+    // The nearest manhole of the surveyed network, and how full it stands.
+    const drain = pipeNet?.nearestNode(lat, lng, 80);
+    if (drain) {
+      const what = drain.pump ? 'pump station' : drain.kind === NODE_SEA_OUTFALL ? 'sea outfall' : 'drain';
+      const state = drain.surcharged
+        ? 'surcharged'
+        : drain.fill > 0.005
+          ? `${Math.round(drain.fill * 100)}% full`
+          : 'dry';
+      lines.push(
+        `Nearest ${what}: ${drain.sizeText ? `${drain.sizeText}, ` : ''}${state}` +
+          `${drain.pumpRunning ? ', pumping' : ''} (${Math.round(drain.distanceM)} m away)`
+      );
+    }
+
     return lines.join('<br />');
   }
 
@@ -713,13 +986,19 @@ export async function initializeMap() {
   });
 
   map.on('click', async (event) => {
-    // Clicking to drop a storm cell must not also open the sample popup.
-    if (rainfall.isPlacingStorm()) {
+    // Clicking to drop a storm cell must not also open the sample popup, and
+    // neither must a click that just opened a drainage cover's popup.
+    if (rainfall.isPlacingStorm() || event.originalEvent?.coverPopupOpened) {
       return;
     }
 
     const { lat, lng } = event.latlng;
     const elevationMeters = await getElevationAt(lat, lng);
+    // The covers layer's handler runs after this one but before the await
+    // resolves, so its flag has to be checked again here.
+    if (event.originalEvent?.coverPopupOpened) {
+      return;
+    }
 
     samplePoint = {
       lat,
@@ -731,6 +1010,25 @@ export async function initializeMap() {
 
     samplePoint.popup.setLatLng(event.latlng).setContent(samplePointContent()).openOn(map);
   });
+
+  if (import.meta.env?.DEV) {
+    // A console handle on the models for poking and scripted checks, e.g.
+    //   __waterMap.rainfall.addStormAt({ lat: 12.93, lng: 100.89 });
+    //   __waterMap.rainfall.advance(600); __waterMap.roadFlow.dynamic.totals()
+    window.__waterMap = {
+      map,
+      rainfall,
+      roadFlow,
+      pipeNet,
+      tide,
+      wind,
+      ensemble,
+      forecastRain,
+      pondingLayer,
+      drainagePipes,
+      drainageCovers
+    };
+  }
 
   return map;
 }
@@ -821,6 +1119,20 @@ function hintClassicToggle(control, layers) {
   for (const input of control._layerControlInputs || []) {
     if (ids.has(input.layerId)) {
       input.parentElement.title = 'Shift + click for the classic style';
+    }
+  }
+}
+
+// Say on hover that a layer only draws once zoomed in, so switching it on at a
+// city-wide view does not read as a broken toggle (the covers are 80k markers,
+// hidden until a street-level zoom).
+function hintLayerToggle(control, layer, text) {
+  const id = L.Util.stamp(layer);
+  for (const input of control._layerControlInputs || []) {
+    if (input.layerId === id) {
+      // The whole row is a <label>; put the hover text there, not on the
+      // inner wrapper, so it shows over the name as well as the checkbox.
+      (input.closest('label') || input.parentElement).title = text;
     }
   }
 }

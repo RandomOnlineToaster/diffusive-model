@@ -26,7 +26,10 @@ export function createRainfallSimulator({
   onTick,
   onReset,
   getWaterOnMapM3,
-  streetCoverage
+  streetCoverage,
+  // () => { east, north } m/s for a newly placed storm, or null: the
+  // steering wind, so a cell drifts the way the weather says it would.
+  defaultVelocity = null
 }) {
   const grid = createRainfallGrid({
     bounds,
@@ -96,6 +99,9 @@ export function createRainfallSimulator({
   let running = false;
   let placing = false;
   let frameHandle = null;
+  // The storm clock counts from zero; the tide and the wind run on real
+  // time. A scenario starts "now", so sim time t is this moment plus t.
+  let scenarioStartMs = Date.now();
   // Set while another rain source - the forecast scrub - holds the grid. The
   // storm loop stays paused for as long as it does, and the storm controls
   // end it before they take the grid back.
@@ -447,8 +453,7 @@ export function createRainfallSimulator({
     }
   }
 
-  function tick() {
-    const dt = (TICK_MS / 1000) * Number(dom.speed.value);
+  function stepScenario(dt) {
     stormSystem.advance(dt);
     grid.step(stormSystem, dt, { noiseAmplitude: config.rainNoiseAmplitude });
     // Deliberately keeps running when the last storm expires or is removed:
@@ -456,6 +461,10 @@ export function createRainfallSimulator({
     // out is the interesting part.
     render();
     onTick?.(dt);
+  }
+
+  function tick() {
+    stepScenario((TICK_MS / 1000) * Number(dom.speed.value));
   }
 
   function setRunning(next) {
@@ -490,6 +499,14 @@ export function createRainfallSimulator({
       rainRadiusMeters: config.stormRainRadius,
       cloudRadiusMeters: config.stormCloudRadius
     });
+
+    // Drift with the steering wind, when there is one; the card's speed
+    // and bearing sliders read it back and can override it.
+    const drift = defaultVelocity?.();
+    if (drift && Number.isFinite(drift.east) && Number.isFinite(drift.north)) {
+      storm.velocityEastMs = drift.east;
+      storm.velocityNorthMs = drift.north;
+    }
 
     handles.refresh();
     selectStorm(storm.id);
@@ -534,6 +551,7 @@ export function createRainfallSimulator({
     setRunning(false);
     stormSystem.clear();
     grid.reset();
+    scenarioStartMs = Date.now();
     selectedId = null;
     handles.refresh();
     refreshStormCards();
@@ -627,6 +645,25 @@ export function createRainfallSimulator({
     },
 
     /**
+     * The moment the simulation is showing, as real time (Unix ms): the
+     * forecast's own clock while a span holds the grid, otherwise the storm
+     * clock counted from when the scenario began. The tide and the wind are
+     * read at this time.
+     */
+    get scenarioTimeMs() {
+      const shown = externalRain?.shownMs;
+      if (Number.isFinite(shown)) {
+        return shown;
+      }
+      return scenarioStartMs + grid.elapsedSeconds * 1000;
+    },
+
+    /** Sim seconds -> Unix ms on the scenario's clock, for the ensemble. */
+    scenarioTimeAt(simSeconds) {
+      return scenarioStartMs + simSeconds * 1000;
+    },
+
+    /**
      * Surface water in mm at a point; 0 outside the grid or once drained.
      * Deliberately the draining field rather than total accumulation, so flow
      * driven by this dries out after the storm moves on.
@@ -642,6 +679,17 @@ export function createRainfallSimulator({
     },
 
     stop: () => setRunning(false),
+
+    /**
+     * Advance the storm clock by dt seconds outside the play loop - what one
+     * tick does, at a chosen size. For scripts and tests; a forecast span
+     * keeps its own clock, so this does nothing while one holds the grid.
+     */
+    advance(dtSeconds) {
+      if (!externalRain && dtSeconds > 0) {
+        stepScenario(dtSeconds);
+      }
+    },
 
     /**
      * The speed slider as a multiple of its default position, so anything
@@ -687,6 +735,7 @@ export function createRainfallSimulator({
     /** Clear the water on the ground without touching the storms. */
     clearWater() {
       grid.reset();
+      scenarioStartMs = Date.now();
       onReset?.();
       render();
     }
