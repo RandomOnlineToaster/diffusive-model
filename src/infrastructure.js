@@ -1,5 +1,6 @@
 import L from 'leaflet';
 import { PIPE_SENSOR_ICON, ROAD_SENSOR_ICON, WATER_GATE_ICON } from './mapIcons.js';
+import { MARKER_OPTIONS, POPUP_OPTIONS, bindHoverTip, detailPopup, escapeHtml } from './mapPopup.js';
 
 // Water infrastructure layers.
 //
@@ -93,7 +94,7 @@ export async function createWaterGateLayer({ isInside } = {}) {
   if (features.length === 0) {
     return {
       layer: L.layerGroup(
-        DEMO_WATER_GATES.map((gate) => waterGateMarker(gate.position, gate.name))
+        DEMO_WATER_GATES.map((gate) => waterGateMarker(gate.position, gate.name, 'demo', 'placeholder'))
       ),
       label: PLACEHOLDER_GATES_LABEL
     };
@@ -104,7 +105,10 @@ export async function createWaterGateLayer({ isInside } = {}) {
       features.map((feature) =>
         waterGateMarker(
           [feature.geometry.coordinates[1], feature.geometry.coordinates[0]],
-          `${feature.properties.name || 'Unnamed'}<br>Type: ${feature.properties.gateType}`
+          feature.properties.name || 'Unnamed water gate',
+          feature.properties.gateType,
+          'OpenStreetMap',
+          feature.properties.operator
         )
       )
     ),
@@ -156,8 +160,22 @@ export async function createWaterBodyLayer({ isInside } = {}) {
   };
 }
 
-function waterGateMarker(position, tooltip) {
-  return L.marker(position, { icon: WATER_GATE_ICON, keyboard: false }).bindTooltip(tooltip);
+function waterGateMarker(position, name, gateType, source, operator = null) {
+  const marker = L.marker(position, { ...MARKER_OPTIONS, icon: WATER_GATE_ICON });
+  bindHoverTip(marker, escapeHtml(name), { offsetY: -12 });
+  marker.bindPopup(
+    () =>
+      detailPopup({
+        title: name,
+        rows: [
+          ['Type', gateType ? escapeHtml(gateType) : null],
+          ['Operator', operator ? escapeHtml(operator) : null]
+        ],
+        source: escapeHtml(source)
+      }),
+    POPUP_OPTIONS
+  );
+  return marker;
 }
 
 // Sampled rather than exhaustive: big reservoirs carry thousands of vertices
@@ -259,16 +277,25 @@ export async function createSensorStationLayer({ sensorType = 'TUNNEL' } = {}) {
     layer: L.geoJSON({ type: 'FeatureCollection', features }, {
       pointToLayer: (feature, latlng) =>
         L.marker(latlng, {
-          icon: inPipe ? PIPE_SENSOR_ICON : ROAD_SENSOR_ICON,
-          keyboard: false
+          ...MARKER_OPTIONS,
+          icon: inPipe ? PIPE_SENSOR_ICON : ROAD_SENSOR_ICON
         }),
       onEachFeature: (feature, featureLayer) => {
-        const { name, heightRef, crossSectionArea } = feature.properties;
-        featureLayer.bindTooltip(
-          `${name}<br>${inPipe ? 'In-pipe sensor' : 'Pole-mounted road sensor'}` +
-            `<br>${inPipe ? 'Pipe height' : 'Road ref'}: ${heightRef} m` +
-            (inPipe ? `<br>Cross-section: ${describeArea(crossSectionArea)}` : ''),
-          { sticky: true }
+        const { name, heightRef, crossSectionArea, stationId } = feature.properties;
+        bindHoverTip(featureLayer, escapeHtml(name), { offsetY: -12 });
+        featureLayer.bindPopup(
+          () =>
+            detailPopup({
+              title: name,
+              rows: [
+                ['Type', inPipe ? 'In-pipe level sensor' : 'Pole-mounted road level sensor'],
+                [inPipe ? 'Pipe height' : 'Road reference', heightRef != null ? `${heightRef} m` : null],
+                ['Cross-section', inPipe ? escapeHtml(describeArea(crossSectionArea)) : null],
+                ['Station', stationId ? escapeHtml(String(stationId).slice(0, 8)) : null]
+              ],
+              source: 'Pattaya SMART GIS sensor network'
+            }),
+          POPUP_OPTIONS
         );
       }
     }),

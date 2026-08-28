@@ -195,12 +195,12 @@ export function createAppLayout(root) {
             <li>Elevation contours: toggleable contour-line overlay</li>
             <li>Rivers &amp; canals: OpenStreetMap waterways (ODbL)</li>
             <li>Lakes, reservoirs and water gates: OpenStreetMap (ODbL)</li>
-            <li>Drainage network: Pattaya city survey (4.5k drain runs, 80k covers, 64 pump stations), run as a pipe graph with Manning flow, inlet capture, tide-bound outfalls and pumps</li>
+            <li>Drainage network: Pattaya city survey (4.5k drain runs, 80k covers, 65 pump stations - one placed from the city's flood plan), run as a pipe graph with Manning flow, inlet capture, tide-bound outfalls and pumps</li>
             <li>Sea level: Open-Meteo Marine tide and surge forecast, with a synthetic harmonic tide as fallback</li>
             <li>Wind: Open-Meteo forecast; the steering wind sets a new storm's drift</li>
             <li>Sensors: in-pipe (tunnel) and pole-mounted road stations</li>
             <li>Flow direction: D8 routing on the analysis grid</li>
-            <li>Catchment (flow accumulation): upstream area draining through each grid cell, where flow converges</li>
+            <li>Catchment: upstream area draining through each grid cell (flow accumulation), where flow converges</li>
             <li>Ponding: standing water painted as bands along the wet streets, as wide as the ground it has spread to</li>
             <li>Street flow: runoff routed along the OSM street network (30 m DEM heights); while it rains the chains follow the live flow, with Horton infiltration and inlets into the drains</li>
             <li>Rainfall: Gaussian storm cells on a grid, placed and moved on the map; the Outcome bar scrubs the next 24 h, and an ensemble of jittered replays gives a flood chance per street</li>

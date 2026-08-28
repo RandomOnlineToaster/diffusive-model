@@ -15,6 +15,7 @@
     "fetch:roads": "node scripts/fetch-roads.mjs",
     "build:roads": "python scripts/build-road-network.py",
     "extract:drainage": "python scripts/extract-drainage.py",
+    "refine:network": "python scripts/refine-road-network.py",
     "build:drainage": "python scripts/build-drainage-model.py",
     "test": "node scripts/test-hydraulics.mjs && node scripts/test-pipe-network.mjs && node scripts/test-forecast-axis.mjs"
   },

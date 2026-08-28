@@ -187,9 +187,15 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     const wetSince = new Float32Array(nodeCount).fill(-1);
     let simSeconds = 0;
 
+    // The ground one junction stands for. Where the city survey gave the
+    // carriageway a width this is that width times the junction's share of
+    // its streets; elsewhere it falls back to the configured patch. It used
+    // to be one number for all 266k junctions, which made a 19 m boulevard
+    // hold water as deep as a 2 m lane.
     const PATCH_M2 = config.streetPatchAreaM2;
+    const patchM2 = new Float64Array(nodeCount);
+    const curbVolM3 = new Float64Array(nodeCount);
     const CURB_M = config.streetCurbDepthM;
-    const CURB_VOL_M3 = PATCH_M2 * CURB_M;
 
     // Water below this is a film, not flow; below the snap volume it is gone.
     const MIN_FLOW_DEPTH = 5e-4;
@@ -213,10 +219,17 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     // Which dead ends meet the sea: the low ones. (Height is the only clue
     // the street graph carries; the pipe network knows its outfalls by
     // distance to the coast.)
+    // Which dead ends meet the sea: the low ones ON THE SHORE. Height alone
+    // was enough while COP30 stood every street metres too high, but with
+    // the surveyed heights plenty of streets a kilometre inland sit under a
+    // metre and a half, and the tide has no business reaching them - so the
+    // build marks which junctions are near the zero-metre contour.
+    const coastal = data.coastal;
     const seaOutfall = new Uint8Array(nodeCount);
     let seaOutfallCount = 0;
     for (let n = 0; n < nodeCount; n += 1) {
-      if (downstream[n] < 0 && elev[n] <= config.seaOutfallMaxElevM) {
+      const onShore = coastal ? coastal[n] === 1 : true;
+      if (downstream[n] < 0 && onShore && elev[n] <= config.seaOutfallMaxElevM) {
         seaOutfall[n] = 1;
         seaOutfallCount += 1;
       }
@@ -244,12 +257,21 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
         halfLen[b] += length / 2;
       }
 
+      const widths = data.width;
       for (let n = 0; n < nodeCount; n += 1) {
+        // The street this junction owns: its surveyed width over half of
+        // every street running into it. Without a width, the configured
+        // patch stands in.
+        const width = widths ? widths[n] : 0;
+        const own = width > 0 && halfLen[n] > 0 ? width * halfLen[n] : PATCH_M2;
+        patchM2[n] = own;
+        curbVolM3[n] = own * CURB_M;
+
         const catchmentM2 = halfLen[n] * config.streetCatchmentWidthM;
-        const factor = (config.streetRunoffCoeff * catchmentM2) / PATCH_M2;
+        const factor = (config.streetRunoffCoeff * catchmentM2) / own;
         // Never less than the rain landing on the street itself.
         runoffFactor[n] = factor > 1 ? factor : 1;
-        floodAreaM2[n] = catchmentM2 > PATCH_M2 ? catchmentM2 : PATCH_M2;
+        floodAreaM2[n] = catchmentM2 > own ? catchmentM2 : own;
       }
     }
 
@@ -374,9 +396,9 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
 
     // The stage-storage curve, volume -> standing depth.
     function depthOf(volume, n) {
-      return volume <= CURB_VOL_M3
-        ? volume / PATCH_M2
-        : CURB_M + (volume - CURB_VOL_M3) / floodAreaM2[n];
+      return volume <= curbVolM3[n]
+        ? volume / patchM2[n]
+        : CURB_M + (volume - curbVolM3[n]) / floodAreaM2[n];
     }
 
     // Flood severity is the DEPTH standing on the street, on fixed stops in
@@ -579,7 +601,8 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
         clearActive();
         for (let n = 0; n < nodeCount; n += 1) {
           const depth = depthMm[n] / 1000;
-          let volume = depth <= CURB_M ? depth * PATCH_M2 : CURB_VOL_M3 + (depth - CURB_M) * floodAreaM2[n];
+          let volume =
+            depth <= CURB_M ? depth * patchM2[n] : curbVolM3[n] + (depth - CURB_M) * floodAreaM2[n];
           if (!(volume > SNAP_DRY_M3)) {
             volume = 0;
           }
@@ -614,12 +637,12 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
         // The same pass collects the active set: every junction holding
         // water, with its links and neighbours.
         clearActive();
-        const rainVolumeScale = (dtSeconds / 3.6e6) * PATCH_M2;
+        const rainVolumeScale = dtSeconds / 3.6e6;
         for (let n = 0; n < nodeCount; n += 1) {
           const cell = rainCells ? rainCells[n] : -1;
           const intensity = rainCells ? (cell >= 0 ? rainField[cell] : 0) : intensityAt(lat[n], lng[n]);
           if (intensity > 0) {
-            const addedM3 = intensity * rainVolumeScale * runoffFactor[n];
+            const addedM3 = intensity * rainVolumeScale * patchM2[n] * runoffFactor[n];
             volM3[n] += addedM3;
             rainedM3 += addedM3;
           }
@@ -757,8 +780,8 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
             }
 
             // Flux runs along the street corridor, so depth moved converts to
-            // volume through the street patch area.
-            const transferM3 = transfer * PATCH_M2;
+            // volume through the sending junction's street area.
+            const transferM3 = transfer * patchM2[src];
             edgeFlow[e] = src === a ? transferM3 : -transferM3;
             proposedOut[src] += transferM3;
           }
@@ -795,7 +818,7 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
               if (transfer > head * 0.25) {
                 transfer = head * 0.25;
               }
-              seaInflow[n] = transfer * PATCH_M2;
+              seaInflow[n] = transfer * patchM2[n];
               continue;
             }
 
@@ -832,7 +855,7 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
             if (transfer > cap) {
               transfer = cap;
             }
-            const transferM3 = transfer * PATCH_M2;
+            const transferM3 = transfer * patchM2[n];
             terminalQ[n] = transferM3;
             proposedOut[n] += transferM3;
           }
@@ -891,8 +914,8 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
             let next = volM3[n] + delta[n];
 
             if (next > 0) {
-              const spread = next > CURB_VOL_M3;
-              const area = spread ? floodAreaM2[n] : PATCH_M2;
+              const spread = next > curbVolM3[n];
+              const area = spread ? floodAreaM2[n] : patchM2[n];
 
               if (wetSince[n] < 0) {
                 wetSince[n] = simSeconds;
@@ -1068,7 +1091,7 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
       // What the Ponding layer paints from: depth per junction and the area
       // each junction's water spreads over.
       floodAreaM2,
-      patchAreaM2: PATCH_M2,
+      patchAreaM2: patchM2,
       curbDepthM: CURB_M,
       depthStops: stops
     };
@@ -1174,8 +1197,10 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
       // of average wet junctions - and the colour carries the amount, on a
       // fixed scale of runoff volume, a decade per class from one cubic metre.
       const weighted = accumulateFlow(nodeCount, downstream, weights);
-      const patchM2 = config.streetPatchAreaM2;
-      const m3Of = (value) => (value * patchM2) / 1000;
+      // A nominal patch for the tooltip's volume, not the per-junction one:
+      // an accumulated total has no single junction to take an area from.
+      const nominalPatchM2 = config.streetPatchAreaM2;
+      const m3Of = (value) => (value * nominalPatchM2) / 1000;
       const classOf = (value) =>
         Math.max(
           0,

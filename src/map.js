@@ -33,6 +33,7 @@ import {
 } from './boundary.js';
 import { createBaseMaps, MAX_ZOOM } from './basemaps.js';
 import { createDrainagePipeLayer, createDrainageCoverLayer } from './drainage.js';
+import { createPumpStationLayer } from './pumpStations.js';
 import { createRoadFlowLayer } from './roadFlow.js';
 import { createPipeNetwork, loadDrainageModel, NODE_SEA_OUTFALL } from './pipeNetwork.js';
 import { createTideSource } from './tide.js';
@@ -195,6 +196,14 @@ export async function initializeMap() {
   } else {
     console.info('Drainage model: off (no drainage-model.json or disabled); streets use the generic drain term');
   }
+  // The pump stations as markers, lit while they pump.
+  const pumpStations = createPumpStationLayer({
+    model: drainageModel,
+    pipeNet,
+    isInside: isInsideProvince
+  });
+  let lastPumpUpdate = 0;
+  const PUMP_UPDATE_MS = 500;
 
   // Standing water as pools: each wet junction's depth painted over the area
   // it has spread to, so low ground reads as a pond rather than a thin line.
@@ -306,7 +315,7 @@ export async function initializeMap() {
   const flowDirectionLabel = demLabel('Flow Direction');
   // "Flow accumulation" is the GIS term for upstream contributing area - where
   // flow CONVERGES, not where water stands - so the menu says so.
-  const flowAccumulationLabel = demLabel('Catchment (flow accumulation)');
+  const flowAccumulationLabel = demLabel('Catchment');
   const flowPathLabel = demLabel('Flow Paths');
   const contourLayerLabel = demLabel('Elevation Contours');
 
@@ -327,6 +336,8 @@ export async function initializeMap() {
       [drainagePipes.available ? drainagePipes.label : wipLabel(drainagePipes.label)]:
         drainagePipes.layer,
       [drainageCovers.label]: drainageCovers.layer,
+      [pumpStations.available ? pumpStations.label : wipLabel(pumpStations.label)]:
+        pumpStations.layer,
       [tunnelSensors.label]: tunnelSensors.layer,
       [poleSensors.label]: poleSensors.layer
     },
@@ -435,6 +446,11 @@ export async function initializeMap() {
     onTick: (dtSeconds) => {
       // An open sample popup reads live, whether or not the street layer is on.
       refreshSamplePopup();
+      const nowMs = performance.now();
+      if (nowMs - lastPumpUpdate > PUMP_UPDATE_MS) {
+        lastPumpUpdate = nowMs;
+        pumpStations.update();
+      }
 
       if (!roadFlow.dynamic) {
         return;
@@ -501,6 +517,7 @@ export async function initializeMap() {
       pipeNet?.reset();
       restorePipeStyles();
       pondingLayer.update?.();
+      pumpStations.update();
       refreshSamplePopup();
       updateDrainageReadout();
       outcome?.invalidate();
@@ -1240,9 +1257,12 @@ export async function initializeMap() {
       forecastRain,
       forecast,
       outcome,
+      // Live, so a setting can be tried without a restart while calibrating.
+      config,
       pondingLayer,
       drainagePipes,
-      drainageCovers
+      drainageCovers,
+      pumpStations
     };
   }
 

@@ -1,6 +1,7 @@
 import L from 'leaflet';
 import { config } from './config.js';
 import { stepContaining } from './forecastAxis.js';
+import { POPUP_OPTIONS, aside, bindHoverTip, detailPopup, escapeHtml } from './mapPopup.js';
 import {
   createForecastGridLayer,
   FORECAST_LEGEND,
@@ -1167,26 +1168,28 @@ export async function createRainGaugeLayer({ isInside } = {}) {
       fillOpacity: 0.9
     });
 
-    marker.bindTooltip(
-      `<strong>${station.name}</strong><br>${station.rainMm.toFixed(1)} mm (${style.text})`,
-      { direction: 'top' }
+    bindHoverTip(
+      marker,
+      `${escapeHtml(station.name)} · ${station.rainMm.toFixed(1)} mm (${style.text})`,
+      { offsetY: -gaugeRadius(station.rainMm) }
     );
 
-    const rows = [
-      ['Rain, 24 h to 07:00', `${station.rainMm.toFixed(1)} mm`],
-      ['Temperature', station.temperature ? `${station.temperature} °C` : null],
-      ['Humidity', station.humidity ? `${station.humidity} %` : null],
-      ['Wind', station.windSpeed ? `${station.windSpeed} km/h from ${station.windDirection}°` : null],
-      ['Pressure', station.pressure ? `${station.pressure} hPa` : null]
-    ].filter(([, value]) => value);
-
     marker.bindPopup(
-      `<strong>${station.name}</strong><br>` +
-        `<small>${station.province} · WMO ${station.wmo}</small>` +
-        '<table class="wx-forecast"><tbody>' +
-        rows.map(([label, value]) => `<tr><td>${label}</td><td>${value}</td></tr>`).join('') +
-        '</tbody></table>' +
-        `<small>Observed ${station.observedAt} (TMD reports once a day: the 24 h total to 07:00)<br>Thai Meteorological Department</small>`
+      detailPopup({
+        title: station.name,
+        subtitle: `${escapeHtml(station.province)} · WMO ${escapeHtml(station.wmo)}`,
+        rows: [
+          ['Rain, 24 h to 07:00', `${station.rainMm.toFixed(1)} mm ${aside(style.text)}`],
+          ['Temperature', station.temperature ? `${station.temperature} °C` : null],
+          ['Humidity', station.humidity ? `${station.humidity} %` : null],
+          ['Wind', station.windSpeed ? `${station.windSpeed} km/h from ${station.windDirection}°` : null],
+          ['Pressure', station.pressure ? `${station.pressure} hPa` : null]
+        ],
+        source:
+          `Observed ${escapeHtml(station.observedAt)} (TMD reports once a day: the 24 h total to 07:00)` +
+          '<br>Thai Meteorological Department'
+      }),
+      POPUP_OPTIONS
     );
 
     group.addLayer(marker);

@@ -1,4 +1,12 @@
 import L from 'leaflet';
+import {
+  POPUP_OPTIONS,
+  aside,
+  bindHoverTip,
+  createCanvasHoverTip,
+  detailPopup,
+  escapeHtml
+} from './mapPopup.js';
 
 // Surveyed drainage network for Pattaya, from the city's GIS geodatabase
 // (Data_Pattaya.gdb, feature datasets `drain` -> drainage_line / drainage_point),
@@ -96,14 +104,7 @@ function gloss(value, table) {
   if (english === value) {
     return escapeHtml(english);
   }
-  return `${escapeHtml(english)} <span class="drain-th">(${escapeHtml(String(value))})</span>`;
-}
-
-function escapeHtml(text) {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return `${escapeHtml(english)} ${aside(`(${value})`)}`;
 }
 
 /** A pipe's bore as a label: box culverts carry W x H, round pipes a diameter. */
@@ -134,25 +135,27 @@ function pipeColor(type) {
   return '#0891b2';
 }
 
-function row(label, value) {
-  return value === null || value === undefined ? '' : `<tr><td>${label}</td><td>${value}</td></tr>`;
-}
+const SURVEY = 'Pattaya drainage survey';
 
 function pipePopup(props) {
   const p = props || {};
-  const title = p.road ? escapeHtml(String(p.road)) : 'Drain pipe';
-  const rows =
-    row('Type', gloss(p.type, PIPE_TYPE)) +
-    row('Size', p.size ? escapeHtml(pipeSize(p.size)) : null) +
-    row('Material', gloss(p.material, PIPE_MATERIAL)) +
-    row('Length', p.length_m != null ? `${Number(p.length_m).toLocaleString()} m` : null);
-  return (
-    `<strong>${title}</strong>` +
-    '<table class="drain-detail"><tbody>' +
-    rows +
-    '</tbody></table>' +
-    '<small>Pattaya drainage survey</small>'
-  );
+  return detailPopup({
+    title: p.road ? String(p.road) : 'Drain pipe',
+    rows: [
+      ['Type', gloss(p.type, PIPE_TYPE)],
+      ['Size', p.size ? escapeHtml(pipeSize(p.size)) : null],
+      ['Material', gloss(p.material, PIPE_MATERIAL)],
+      ['Length', p.length_m != null ? `${Number(p.length_m).toLocaleString()} m` : null]
+    ],
+    source: SURVEY
+  });
+}
+
+/** The hover line for a pipe: "Soi 10 · Ø0.8 m" or the type alone. */
+function pipeTip(props) {
+  const p = props || {};
+  const what = p.size ? pipeSize(p.size) : PIPE_TYPE[p.type] || 'Drain pipe';
+  return escapeHtml(p.road ? `${p.road} · ${what}` : what);
 }
 
 function coverSizeText(p) {
@@ -177,21 +180,25 @@ function manholeSizeText(p) {
 
 function coverPopup(props) {
   const p = props || {};
-  const title = p.road ? escapeHtml(String(p.road)) : 'Drainage cover';
-  const rows =
-    row('Cover', gloss(p.cover, COVER_MATERIAL)) +
-    row('Cover size', coverSizeText(p) ? escapeHtml(coverSizeText(p)) : null) +
-    row('Manhole depth', p.depth_m != null ? `${p.depth_m} m` : null) +
-    row('Manhole size', manholeSizeText(p) ? escapeHtml(manholeSizeText(p)) : null) +
-    row('Use', gloss(p.use, COVER_USE)) +
-    row('Source', gloss(p.source, SOURCE));
-  return (
-    `<strong>${title}</strong>` +
-    '<table class="drain-detail"><tbody>' +
-    rows +
-    '</tbody></table>' +
-    '<small>Pattaya drainage survey</small>'
-  );
+  return detailPopup({
+    title: p.road ? String(p.road) : 'Drainage cover',
+    rows: [
+      ['Cover', gloss(p.cover, COVER_MATERIAL)],
+      ['Cover size', coverSizeText(p) ? escapeHtml(coverSizeText(p)) : null],
+      ['Manhole depth', p.depth_m != null ? `${p.depth_m} m` : null],
+      ['Manhole size', manholeSizeText(p) ? escapeHtml(manholeSizeText(p)) : null],
+      ['Use', gloss(p.use, COVER_USE)],
+      ['Source', gloss(p.source, SOURCE)]
+    ],
+    source: SURVEY
+  });
+}
+
+/** The hover line for a cover: what it is, and the road when known. */
+function coverTip(props, isInlet) {
+  const p = props || {};
+  const what = isInlet ? 'Grated inlet' : 'Manhole cover';
+  return escapeHtml(p.road ? `${what} · ${p.road}` : what);
 }
 
 async function loadJSON(url) {
@@ -228,12 +235,14 @@ export async function createDrainagePipeLayer({ isInside } = {}) {
     return feature.geometry.coordinates.some(([lng, lat]) => isInside(lat, lng));
   });
 
+  // Half-transparent, so the streets and the flow layers read through the
+  // network rather than under it; the rain-time recolour keeps the opacity.
   const baseStyle = (feature) => {
     const p = feature.properties || {};
     return {
       color: pipeColor(p.type),
       weight: 1.5 + Math.min(3, boreMeters(p.size)) * 1.1,
-      opacity: 0.9
+      opacity: 0.5
     };
   };
 
@@ -247,7 +256,8 @@ export async function createDrainagePipeLayer({ isInside } = {}) {
       style: baseStyle,
       onEachFeature: (feature, featureLayer) => {
         featureLayers.set(feature.id, featureLayer);
-        featureLayer.bindPopup(() => pipePopup(feature.properties), { maxWidth: 280 });
+        bindHoverTip(featureLayer, pipeTip(feature.properties), { sticky: true });
+        featureLayer.bindPopup(() => pipePopup(feature.properties), POPUP_OPTIONS);
       }
     }
   );
@@ -323,8 +333,10 @@ const DrainageCovers = L.Layer.extend({
     this._drawnIds = null;
     this._drawnPx = null;
     this._drawnCount = 0;
+    this._hoverTip = null;
     this._redraw = this._redraw.bind(this);
     this._onClick = this._onClick.bind(this);
+    this._onMouseMove = this._onMouseMove.bind(this);
   },
 
   onAdd(map) {
@@ -332,13 +344,20 @@ const DrainageCovers = L.Layer.extend({
     this._canvas = L.DomUtil.create('canvas', 'leaflet-layer leaflet-zoom-hide drainage-covers');
     this._ctx = this._canvas.getContext('2d');
     this.getPane().appendChild(this._canvas);
+    this._hoverTip = createCanvasHoverTip(map);
     map.on('click', this._onClick);
+    map.on('mousemove', this._onMouseMove);
+    map.on('mouseout', this._onMouseMove);
     this._ensureData().then(() => this._redraw());
     this._redraw();
   },
 
   onRemove(map) {
     map.off('click', this._onClick);
+    map.off('mousemove', this._onMouseMove);
+    map.off('mouseout', this._onMouseMove);
+    this._hoverTip?.hide();
+    this._hoverTip = null;
     this._canvas.remove();
     this._canvas = null;
     this._ctx = null;
@@ -466,24 +485,45 @@ const DrainageCovers = L.Layer.extend({
     }
   },
 
-  // A click near a drawn cover opens its survey popup, and flags the event so
-  // the map's own sample-point popup leaves it alone.
-  _onClick(event) {
-    if (this._drawnCount === 0 || !this._index) {
-      return;
+  /** The drawn cover under a container point, or -1. */
+  _hit(point) {
+    if (this._drawnCount === 0 || !this._index || !point) {
+      return -1;
     }
-    const { x, y } = event.containerPoint;
     let best = -1;
     let bestDistance = COVER_HIT_PX;
     for (let k = 0; k < this._drawnCount; k += 1) {
-      const dx = this._drawnPx[k * 2] - x;
-      const dy = this._drawnPx[k * 2 + 1] - y;
+      const dx = this._drawnPx[k * 2] - point.x;
+      const dy = this._drawnPx[k * 2 + 1] - point.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
       if (distance < bestDistance) {
         bestDistance = distance;
         best = this._drawnIds[k];
       }
     }
+    return best;
+  },
+
+  // Hovering a drawn cover shows its name tip and the pointer cursor, the
+  // way a marker would.
+  _onMouseMove(event) {
+    const i = event.type === 'mouseout' ? -1 : this._hit(event.containerPoint);
+    if (i < 0) {
+      this._hoverTip?.hide();
+      return;
+    }
+    const index = this._index;
+    this._hoverTip?.show(
+      i,
+      [index.lat[i], index.lng[i]],
+      coverTip(index.props[i], index.inlet[i] === 1)
+    );
+  },
+
+  // A click near a drawn cover opens its survey popup, and flags the event so
+  // the map's own sample-point popup leaves it alone.
+  _onClick(event) {
+    const best = this._hit(event.containerPoint);
     if (best < 0) {
       return;
     }
@@ -491,7 +531,8 @@ const DrainageCovers = L.Layer.extend({
     if (event.originalEvent) {
       event.originalEvent.coverPopupOpened = true;
     }
-    L.popup({ maxWidth: 280 })
+    this._hoverTip?.hide();
+    L.popup(POPUP_OPTIONS)
       .setLatLng([this._index.lat[best], this._index.lng[best]])
       .setContent(coverPopup(this._index.props[best]))
       .openOn(this._map);

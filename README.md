@@ -34,10 +34,19 @@ storms and routes the resulting water across terrain and streets.
   gauges — 127 stations nationwide, 14 of them inside the study area.
 - **Drainage Network** — the city's surveyed drainage, from its GIS
   geodatabase: **Drainage Pipes** (gravity drains and box culverts, coloured
-  by type and weighted by bore) and **Drainage Covers** (manholes and grated
-  inlets). Click any pipe or cover for its survey detail — size, material,
-  manhole depth. The covers are ~80k points, so that layer loads on first use
-  and only draws once zoomed in to street level.
+  by type and weighted by bore), **Drainage Covers** (manholes and grated
+  inlets) and **Pump Stations** (the purple pump icons - the 64 the survey
+  places plus Khao Noi from the city plan). Click any pipe or cover for its
+  survey detail — size, material, manhole depth; click a pump for its rated
+  flow, whether it is pumping and how much it has lifted. The covers are ~80k
+  points, so that layer loads on first use and only draws once zoomed in to
+  street level. A pump station lights up while it runs.
+
+Every clickable thing on the map behaves the same way: hovering it shows a
+small name tip and the pointer cursor, clicking it opens the same detail
+card - a title, a label/value table, and where the data came from. That
+goes for pump stations, tunnel and pole sensors, water gates, TMD rain
+gauges, and the drainage pipes and covers alike.
 - **Infrastructure layers** — rivers, water bodies, water gates, a demo pipe
   network (seeding the pipe simulation) and sensor stations.
 
@@ -52,13 +61,13 @@ can replace an assumption without touching the maths. The formulas live in
 
 | Piece | What it does | Assumption until better data arrives |
 | --- | --- | --- |
-| Pipe graph | `scripts/build-drainage-model.py` snaps the 4.5k surveyed drain runs into ~6.9k junctions and ~9.4k conduits, each with its surveyed size (round or box), material roughness and length | Junction ground = nearest street junction's DEM height; invert = ground - 0.6 m cover - pipe height (`PIPE_COVER_DEPTH_M`) |
-| Pipe flow | Manning's equation on the **hydraulic grade line** between junctions, for the depth of flow in the pipe, in whichever direction the HGL slopes; a manhole is a tank (shaft + half of each pipe) that surcharges above the crown and spills onto its street at the lid | Shaft plan area from the cover survey where recorded, else 1 m² |
+| Pipe graph | `scripts/build-drainage-model.py` snaps the 4.5k surveyed drain runs into ~6.9k junctions and ~9.4k conduits, each with its surveyed size (round or box), material roughness and length | Ground = nearest street junction's height (now the city's own contours). **58 % of inverts are measured**: a manhole depth (`DEEP_MH`) within 15 m, else the depth to the back of the drain within 30 m; the rest still assume 0.6 m of cover (`PIPE_COVER_DEPTH_M`) |
+| Pipe flow | Manning's equation on the **hydraulic grade line** between junctions, for the depth of flow in the pipe, in whichever direction the HGL slopes; a manhole is a tank (shaft + half of each pipe) that surcharges above the crown and spills onto its street at the lid | Shaft plan area from the cover survey where recorded, all 21 surveyed pump sumps from their footprints, else 1 m² |
 | Inlets | Each grated cover feeds the nearest conduit at min(weir, orifice) capacity for the standing depth, half blocked by litter (`VITE_INLET_CLOGGING`), and only while the manhole has room | Grate 0.4 x 0.6 m where the survey has no size |
 | Outfalls | A run end within 250 m of the coast is a **sea outfall** whose receiving level is the live sea level; one within 40 m of an OSM waterway is a canal outfall (free); a network with neither gets its lowest dead end as an outfall | Open outfalls: the tide flows back in (`VITE_OUTFALL_FLAP_VALVE`) |
 | Pumps | 62 of the 64 surveyed stations sit on the graph; each pumps its sump out above a start depth until a stop depth | Every station 1 m³/s (`VITE_PUMP_RATED_M3S`) - the survey records names only |
 | Sea level | Open-Meteo Marine hourly sea level (tide + surge), read a little offshore at the moment on the scenario's clock; a synthetic harmonic tide when offline; a **surge slider** adds metres on top | COP30 heights ~ metres above MSL |
-| Streets | Street dead ends at or below 1.5 m meet the sea and drain against it - or take it in when drowned; other dead ends discharge freely. Inside the surveyed area the inlets are the only way down; outside it the generic `VITE_STREET_DRAIN_MM_H` term stands in | Coast recognised by height alone in the street graph |
+| Streets | A street dead end **on the shore** (within 250 m of the zero-metre contour) and at or below 1.5 m meets the sea and drains against it - or takes it in when drowned; other dead ends discharge freely. Inside the surveyed area the inlets are the only way down; outside it the generic `VITE_STREET_DRAIN_MM_H` term stands in | 850 of them; the shoreline comes from the contours, the threshold is still a setting |
 | Infiltration | The pervious share of wet ground (5 % of a street patch, 35 % of the flood strip past the kerb) soaks on Horton's curve, 60 -> 12 mm/h | Sandy loam everywhere |
 | Wind | Open-Meteo hourly wind; a new storm cell drifts at 0.75 x the 850 hPa wind (or 1.5 x the 10 m wind when no wind aloft is served); surface wind, gusts and pressure show in the panel | |
 | Ensemble | **Run ensemble** replays the placed storms N times from dry ground with jittered track, speed, bearing, size and intensity (seeded, so repeatable), records each street's peak depth, and paints the share of runs deeper than 5 cm | 8 members x 3 h at 5-minute steps, about 30 s |
@@ -68,11 +77,11 @@ live state (hover for the water balance), the sample-point popup names the
 nearest manhole and how full it is, and the **Drainage Pipes** layer
 recolours each run by how full it runs while it rains.
 
-Known gap, deliberately left for the data pass: the street heights come from
-COP30, which sits 3-4 m above the city's own benchmarks on the coastal flat,
-so where water ponds is only as good as those heights. The pipe model reads
-its ground levels from the same street heights, so correcting them (from the
-city's 2 m contours) corrects both at once.
+Heights now come from the city's own 2 m contours on its benchmark datum
+(MAE 0.69 m against the benchmarks, against COP30's 4.03 m), and the pipe
+model reads its ground from the same array, so both improved together. What
+remains is vertical detail: a 2 m contour interval settles where water goes
+but not the 10-30 cm dips that set how deep it stands.
 
 ## Requirements
 
@@ -172,9 +181,10 @@ runs.
 | **Street Flow** | While it rains: every wet street coloured by standing depth (green 0.5 cm → red 50 cm), with particle trails running the way the water is actually moving. Without rain: the terrain's steepest-descent routes | Hover a street for its depth and flow. **Flow detail** trades chains for speed |
 | **Ponding** | The standing water itself: a blue band along each wet street, as wide as the ground the water has spread to (the street below the kerb, the 60 m catchment strip above it), darker the deeper - so a flooded block reads as a flooded block | Sits under the other layers. Needs real depth - a light shower drains before it ponds; the default 100 mm/h cell over central Pattaya floods within a few minutes |
 | **Flow Direction / Flow Paths** | The 200 m grid's D8 field and channel tree; under rain the tree is lit where rain has recently fallen | Catchment scale, not street scale |
-| **Catchment (flow accumulation)** | Upstream area draining through each grid cell - where flow converges | Not where water stands: that is Ponding |
+| **Catchment** | Upstream area (flow accumulation) draining through each grid cell - where flow converges | Not where water stands: that is Ponding |
 | **Drainage Pipes** | The surveyed drain runs, coloured by type and weighted by bore; while it rains, recoloured by how full each run is (blue → red) | Click a run for size, material, length |
 | **Drainage Covers** | Manholes (slate) and grated inlets (blue) | Draws from zoom 15 in. Click one for cover size, manhole depth, source |
+| **Pump Stations** | The 65 stations as purple pump icons, lit while pumping | Click one for its rated flow (city plan or default), sump depth, and the volume it has lifted this run. Khao Noi is placed from the plan's description and says so |
 
 Shift + click a flow layer's checkbox for its classic rendering (dashes, or
 arrows for Flow Direction) instead of the particle trails.
@@ -248,6 +258,7 @@ GitHub's file limit, and everything is reproducible.
 | `npm run fetch:rivers` / `fetch:water` | Download OSM waterways and water bodies |
 | `npm run build:pattaya` | Build pipe and sensor layers from the GIS exports in `data/pattaya` |
 | `npm run extract:drainage` | Export the surveyed drains, covers and pump stations from the city geodatabase |
+| `npm run refine:network` | Replace the street graph's COP30 heights with the city's 2 m contours on the benchmark datum, and add carriageway widths |
 | `npm run build:drainage` | Build the pipe graph the simulation runs (`drainage-model.json`) from those exports and the street graph |
 | `npm test` | Check the hydraulic formulas and the pipe model against known values |
 
@@ -374,10 +385,14 @@ adds each cell's weight (1, or its rain depth in rain mode) to its downstream
 cell, so a cell's value is the number of cells - or the mm of water - draining
 through it. Contours are marching squares at 5/10/20/50 m intervals.
 
-**Street graph** (`scripts/build-road-network.py`, `src/roadFlow.js`). OSM
-streets become a graph of 266k junctions and 273k links; extra points are
-inserted every 20 m so height can vary along a street, and each point takes a
-**bilinear** DEM height so neighbours inside one 30 m cell still differ.
+**Street graph** (`scripts/build-road-network.py`, `scripts/refine-road-network.py`,
+`src/roadFlow.js`). OSM streets become a graph of 266k junctions and 273k
+links; extra points are inserted every 20 m so height can vary along a
+street. Heights start as **bilinear** COP30 samples and are then replaced,
+for the 82 % of junctions the city survey reaches, by a surface interpolated
+from its 2 m contours - see *Heights* below. Widths come from the survey's
+road centrelines, and each junction is flagged coastal if it lies within
+250 m of the zero-metre contour.
 Shoreline points that sample water are clamped to 0 m. At load the heights are
 cleaned: six passes clamp any junction more than 0.25 m from the mean of its
 neighbours (building bleed), dead-end tips are held within 0.1 m below their
@@ -387,12 +402,30 @@ same priority-flood way (epsilon 1e-4 m), with outlets at every junction
 within 1 m of the lowest height and every junction on the 1 % margin of the
 downloaded box, and each junction's `downstream` is its lowest neighbour.
 
+**Heights** (`scripts/refine-road-network.py`). The 391k vertices of
+`contour2m` and `contour` are thinned to 8 m spacing and burned into a grid,
+whose gaps are filled by Laplace relaxation run coarse to fine (320 m down to
+20 m, each level seeding the next). That is the usual way to turn contours
+into a raster and needs no SciPy. The result is then **shifted onto the
+benchmark datum**: the contour surface reads +4.67 m at the city's 366
+levelled benchmarks, near enough uniformly at every height, and COP30 agrees
+with the contours to within a metre - so it is the benchmarks that stand
+apart, and they are the ones to believe, being levelled marks and the only
+ones that put Pattaya Beach Road at the 1-2 m it plainly is. After the shift
+the surface sits within **0.54 m (median) of a benchmark, MAE 0.69 m, p90
+1.41 m**, against COP30's MAE of 4.03 m. Outside the contours the COP30
+height is kept less a plane fitted to its bias inside, so the two join
+without a step. `CONTOUR_DATUM_SHIFT_M` overrides the shift.
+
 **Drain graph** (`scripts/build-drainage-model.py`). Run ends within 3 m are
 snapped into junctions; a run ending against the side of another run splits it
 (T-junction). Size strings become a round diameter or a box `W × H` (values
 over 20 are millimetres); Manning n is 0.011 for HDPE/PVC and 0.013 for
-concrete. Each junction's ground is the nearest street junction's height and
-its invert is `ground − 0.6 m cover − pipe height`. Outfalls: a dead end within
+concrete. Each junction's ground is the nearest street junction's height.
+Its invert is measured where the survey says how deep the drain runs - a
+manhole depth (`DEEP_MH`) within 15 m for 3,337 junctions, the depth to the
+back of the drain within 30 m for 656 more - and assumes 0.6 m of cover for
+the remaining 42 %. Outfalls: a dead end within
 250 m of the coast meets the sea, one within 40 m of an OSM waterway is free,
 and a network with neither gets its lowest dead end as an outfall. Grated
 covers become inlets on the nearest conduit with perimeter `2(w + l)` (or
@@ -431,15 +464,18 @@ re-rains the span from its start, so what is on screen is a pure function of
 
 ### 3. Water on the streets (`src/roadFlow.js`)
 
-State is a **volume** per junction. Each junction collects rain from a strip
-60 m wide along half of every street it touches, of which 90 % runs off:
+State is a **volume** per junction. The ground a junction stands for is its
+surveyed carriageway width times half of every street running into it -
+`patch = width · halfLength`, 2 to 19 m of width where the city's centrelines
+reach (23k junctions), the configured 120 m² elsewhere. It collects rain from
+a strip 60 m wide along those same half-streets, of which 90 % runs off:
 
-    runoffFactor = max(1, 0.9 · halfLength · 60 / 120)      (120 m² = one street patch)
-    rain added   = I · dt/3.6e6 · 120 · runoffFactor         [m³]
+    runoffFactor = max(1, 0.9 · halfLength · 60 / patch)
+    rain added   = I · dt/3.6e6 · patch · runoffFactor         [m³]
 
 Depth comes from a two-stage stage-storage curve: up to the 0.15 m kerb the
-water stands on the 120 m² patch (`depth = V / 120`); above it the flood
-spreads over the whole catchment strip (`depth = 0.15 + (V − 18) / stripArea`).
+water stands on the patch (`depth = V / patch`); above it the flood spreads
+over the whole catchment strip (`depth = 0.15 + (V − kerbVolume) / stripArea`).
 
 Every link moves water by **Manning's law on the water-surface slope**, never
 the ground slope, which is what makes a full downstream street back water up:
@@ -554,7 +590,7 @@ snapshot, plus replaying the rain grid to it) 40-140 ms.
 
 *Flow Direction* and *Flow Paths* draw the D8 tree of the analysis grid (cells
 above the 98.5th percentile of accumulation, or above 5,000 m³ of storm water
-in rain mode); *Catchment (flow accumulation)* is that tree's upstream area -
+in rain mode); *Catchment* is that tree's upstream area (flow accumulation) -
 where flow converges, not where water stands. *Street Flow* draws the street
 chains carrying at least 25 upstream junctions - or, while it rains, the
 standing depth from stage 3, chained along the LIVE flow: each wet junction
@@ -565,7 +601,9 @@ it has spread to (the street patch below the kerb, the catchment strip above
 it), so pools read as pools. The *Drainage Pipes* layer recolours each
 surveyed run by `max(depth at either end) / pipe height` from stage 4; the
 *Drainage Covers* layer draws the 80k covers from a grid index onto one
-canvas, inlets in blue. Colour classes on the flow layers are
+canvas, inlets in blue; the *Pump Stations* layer is one marker per
+station, its class toggled by the model's pump state every half second.
+Colour classes on the flow layers are
 logarithmic in accumulation; on the streets and pipes they are the fixed
 stops above, so a colour always means the same amount of water.
 
@@ -594,6 +632,13 @@ stops above, so a colour always means the same amount of water.
 - Show all of it: flood depth per street on fixed colour stops with chains
   along the live flow, pools of standing water (Ponding), pipe fill per run, live water balances on the panel tiles, a sample-point popup with
   the nearest manhole, GSMaP cloud, two forecast providers and the TMD gauges.
+- Run on the city's own survey where it has one: street heights from its 2 m
+  contours on its benchmark datum, 58 % of pipe inverts from measured depths,
+  real pump sump footprints, surveyed carriageway widths, and a shoreline test
+  for which streets drain to the sea.
+- Be checked against the city's own level sensors: the streets now shed water
+  at the rate the road sensors show, and the pipes stay full for hours as the
+  tunnel sensors show (see *Checked against the sensors*).
 - Prove it conserves water: `npm test` plus a headless run close both balances
   to under 1e-5 m³.
 
@@ -622,29 +667,129 @@ stops above, so a colour always means the same amount of water.
 
 ### What has to change - the data pass
 
-Every assumed number is a config key or a build-script constant, so
-replacing it is a data change, not a code change. The full inventory,
-ordered by how much each one moves the result, is the next section.
+The city geodatabase has now been mined for everything it already held:
+heights, the vertical datum, the shoreline, pipe inverts, pump sumps and
+carriageway widths are all measured rather than assumed. What is left needs a
+new survey - levelled inverts, pump ratings, grate sizes, clogging. The full
+inventory, applied and outstanding, is the next section.
 
 ## Numbers to replace
 
-What the model runs on that is *assumed* rather than *measured*, grouped by
-where it enters the calculation and ordered by how much it moves the
-answer. Each row names the key or constant to change and the data that
-would replace it.
+What the model runs on that is *assumed* rather than *measured*, and what
+would replace it. Everything here is a config key or a build-script constant,
+so replacing one is a data change, not a code change.
 
-### Tier 1 - these dominate what the map shows
+### Applied - taken from the city survey, no longer assumed
+
+These were assumptions until the geodatabase was mined for what it already
+held. `npm run refine:network` and `npm run build:drainage` produce them.
+
+| Number | Was | Is now |
+| --- | --- | --- |
+| **Street heights** | COP30 30 m surface model: +3.9 m against the benchmarks, MAE 4.03 m, buildings and all | A surface interpolated from the city's 2 m contours (391k vertices), shifted onto the benchmark datum: **MAE 0.69 m, p90 1.41 m**, over the 82 % of junctions the contours reach. Outside them, COP30 less a fitted bias plane |
+| **Vertical datum** | Unstated - COP30 heights compared straight against a tide quoted above MSL | Measured and reconciled: the contours read +4.67 m at the 366 benchmarks and COP30 agrees with the contours, so the benchmarks are the odd product out and the whole surface is shifted onto them (`CONTOUR_DATUM_SHIFT_M`) |
+| **Which streets meet the sea** | Any dead end at or below 1.5 m - 23 of them, because COP30 stood every street metres too high | Dead ends within 250 m of the zero-metre contour AND at or below 1.5 m: 850 of them. Without the shoreline test the corrected heights would have let the tide into 1,553 streets, most of them inland |
+| **Pipe inverts** | `ground - 0.6 m - pipe height` everywhere | **58 % measured**: a manhole depth (`DEEP_MH`) within 15 m for 3,337 junctions, the depth to the back of the drain within 30 m for 656 more; the rest still assume 0.6 m of cover |
+| **Pump sump area** | 1 m² shaft, like any other manhole | All **21 surveyed sump footprints** (`ผังบ่อสูบน้ำ_polygon`), matched to their station |
+| **Street patch area** | A flat 120 m² for all 266k junctions | The surveyed carriageway width times half of every street into the junction - 2 to 19 m of width across 23k junctions (`roadcl_arc`), 120 m² elsewhere |
+| **Inlet density** | One inlet per 17 street junctions - only the 3,800 covers the survey classes as gratings | **One per street junction** over the drain (44,651), sized by the surveyed gratings beside it where there are any and by a default kerb opening where there are not. Calibrated against the city's road sensors - see *Checked against the sensors* |
+| **Pump capacity** | 1 m³/s at every station | The city plan's rated flows at the 9 stations it names (0.99-10 m³/s), Khao Noi added at its described position; the rest keep the default |
+| **Drain gradient** | Inverts followed the ground, so on the flat 22 % of runs had less than 1 in 1000 of fall and nowhere to send their water | Graded back from each outfall at a minimum 1 in 667 wherever the pipe can still be buried (`DRAIN_MIN_GRADE`): 3,689 junctions lifted, now 15 % under 1 in 1000 |
+
+### Checked against the sensors
+
+The city runs 58 level sensors on its drains and streets, archived at
+6-minute resolution (`D:\Code\_SCS\data\sensor`, one CSV per station).
+Reading every event where a level rose and fell back gives the behaviour the
+model has to reproduce, and the two kinds of sensor say different things:
+
+| Sensor | Typical event | Back to baseline | Fall rate |
+| --- | --- | --- | --- |
+| **ROAD** (11 stations, water on the street) | rises 1.31 m | **14 min** | **8.3 m/h** |
+| **TUNNEL** (in the pipe) | rises 0.9 m | 2-5 h | 0.3 m/h |
+
+So the street empties into the drain in minutes while the drain itself stays
+full for hours. That two-timescale shape is the test, and the model failed
+the first half of it: it took over twenty hours to shed a metre.
+
+The figures above come from the 79-day per-station archive; the three-month
+archive (`D:\Code\_SCS\data\alltime`, one 683 MB CSV, 6.6 million rows,
+May-August 2026) gives the same numbers on twice the events - 3,288 road
+events across 11 stations, 1,697 pipe events across 39 - so they are not a
+quirk of one wet fortnight. The 16 stations with a flow meter are not usable
+for calibrating conveyance: most read zero throughout and one reads 10³⁶.
+The city's own plan agrees with the sensors: it puts the longest standing
+water at **about two hours**, which is what the pipe sensors show and the
+model reproduces at its deepest spots.
+
+The cause was inlet density, not inlet size. One surveyed grating passes
+about 5 m/h off its own patch at a metre's depth - the right order - but the
+survey classes only 3,800 of its 79,929 covers as gratings, which left one
+inlet per seventeen junctions, so each had to drain seventeen junctions'
+worth. To match the sensors a junction needs roughly 0.3 m² of opening of
+its own, which is a kerb inlet every 20 m: what a covered trench along a
+kerb actually is. With one inlet per junction the streets now shed 636,000 m³
+of a 1,032,000 m³ design storm through the inlets and the count of wet
+junctions halves in about 40 minutes.
+
+What is left is honest and worth stating: after the rain stops, the deepest
+spots still get *worse* for half an hour or so, because surcharged manholes
+push water back up (235,000 m³ of it in that storm). Water coming up out of
+the drains is a real Pattaya phenomenon, but the model probably overdoes it.
+Sweeping the plausible range of pump capacity (1 to 6 m³/s a station) and
+grate clogging (20 % to 80 %) moves the result barely at all, so neither is
+the binding constraint: it is **conveyance in the laterals**. Six inlets
+feeding one junction can deliver about 2 m³/s, and a Ø0.6 m pipe at 1 in 200
+carries 0.4 m³/s. Whether that is the city's real bottleneck or an artefact
+of inverts derived from depths rather than levelled, only surveyed invert
+levels will settle - which is why they head the list below.
+
+### From the city's flood plan
+
+The Sanitary Engineering Office's plan (`004.การรับมือปัญหาน้ำท่วมเมืองพัทยา`,
+81 slides) is the other source the survey lacked. What it gives, and what
+the model does with it:
+
+| In the plan | Figure | Used how |
+| --- | --- | --- |
+| **Pump station capacities** | Sump 1 1.65, Sump 2 0.99, Sump 3 0.99, Sump 4 1.98, Sump 5 3.3, Sump 6 3.3 m³/s (Sukhumvit and the railway road, to the retention pond); PS7 at Walking Street 2 × 18,000 m³/h = 10 m³/s; PSK at Khlong Pluk Plub 3 × 9,000 m³/h = 7.5 m³/s; Khao Noi 6 × 3,600 m³/h = 6 m³/s | **Applied** to the 8 stations whose survey name matches (`PUMP_RATES_M3S` in `scripts/build-drainage-model.py`, read per pump at run time). Khao Noi has no counterpart in the survey's pump layer, so it is added from the plan's description (`EXTRA_PUMPS`: on the railway road just south of Sump 3, 44 m from the trunk it serves) and its marker says the position is approximate - move it when it is surveyed. The other 54 stations - mostly sewage lift stations - keep `VITE_PUMP_RATED_M3S` |
+| Retention pond (แก้มลิง) | 100,000 m³, fed by Sumps 1-6 | Not modelled: the sumps pump "out of the system". Over one storm the pond is far from full; over a wet week it would not be |
+| **Drainage capacity by area** | For the 2-year storm (68.9 mm/day): area 1 47.5 mm/day, area 2 24.8, area 3 51.0, area 4 60.6; for the 5-year (101.7 mm/day): 47.8, 24.4, 50.9, 61.0 | The next validation target: a day of steady rain at those rates over each area should just clear |
+| Longest standing water | about 2 hours; ~30 % of the city floods (North 10.8 km², Central 11.0, South 17.7) | Matches the pipe sensors and the model's deepest spots |
+| The five "water masses" | Routes the floods actually take - e.g. Soi Sukhumvit 45 → box under Sukhumvit → Soi Phaniat Chang → Mum Aroi junction → Pattaya 2nd Road → Soi 6/1 → Beach Road; Khao Noi station overflow → Sukhumvit-South Pattaya junction; Soi Nong Krabok → Soi Chularat and Thepprasit 7/9 | Qualitative validation for Flow Paths and Street Flow: the model's chains should trace these |
+| Strategy | Railway road and Sukhumvit as barriers; Pattaya 3rd Road and 2nd Road / Jomtien 2nd Road as north-south collectors; the beach roads discharge to sea through PS7 and PS12 | Explains why the surveyed network is shaped as it is |
+
+### How accurate is it likely to be
+
+An estimate, not a measurement - the model has been checked against the
+sensors' timescales and the plan's figures, never against a mapped flood.
+By what you would ask of it:
+
+| Question | Likely accuracy today | What limits it |
+| --- | --- | --- |
+| *Which streets flood first in a big storm?* | Fair - perhaps two thirds to three quarters of the city's known trouble spots should light up in the right order | Heights: 2 m contours on the benchmark datum, 0.69 m error against the benchmarks. A sag less than a metre deep is invisible to them, and the interpolation invents dips of its own |
+| *How deep, at an address?* | Poor - a factor of two either way | The ponded area per junction (surveyed width × half a street, else 120 m²) and the 60 m catchment strip are assumptions; depth is volume over that area |
+| *How long it stands* | Fair on the streets (model halves its wet count in 40 min, the road sensors clear in 14), about right in the pipes (hours) | Lateral conveyance: assumed inverts, one kerb inlet per junction |
+| *How full each drain runs* | Poor per run, fair as a whole | 58 % of inverts are a default 0.6 m cover, then graded; the survey has no pipe levels |
+| *City-wide volumes - ponded, drained to sea, pumped* | Fair - within about a third | Rain input, outfall and pump totals are the constrained parts; both water balances close to numerical precision |
+| *Anything more than ~6 hours ahead from a forecast* | Governed by the rain forecast, not the hydraulics | A convective cell's forecast position is off by tens of kilometres and its intensity by a factor of two; the drainage model cannot recover that |
+
+In short: a qualitative-to-semi-quantitative tool. Trust it for *where* and
+*roughly how long*, and for comparing scenarios (a pump off, a storm from
+another bearing, a higher tide); do not trust a depth to the centimetre.
+What moves each row is in the tiers below - levelled inverts first, then
+half-metre heights, then the inlets.
+
+### Tier 1 - what still matters most
 
 | Number | Now | Where | Replace with |
 | --- | --- | --- | --- |
-| **Street heights** | COP30 30 m surface model, bilinear; +3-4 m above the city benchmarks, noisy | `scripts/build-road-network.py` -> `elev[]`; everything downstream reads it | City `contour2m` + 366 benchmarks, or LiDAR. The single biggest error term |
-| Height clean-up thresholds | despike 0.25 m x 6 passes, dead-end tip 0.1 m, noise pits <= 0.35 m or <= 3 junctions filled | `src/roadFlow.js`, `VITE_STREET_MAX_NOISE_PIT_M`, `VITE_STREET_MIN_BASIN_NODES` | Become unnecessary (or near zero) once heights are real |
-| **Pipe inverts** | `ground - 0.6 m cover - pipe height`; 22 % of conduits come out flatter than 0.1 % | `PIPE_COVER_DEPTH_M` in `scripts/build-drainage-model.py` -> `nodes.invert[]` | Surveyed invert levels; the 9,062 `ความลึกหลังท่อระบายน้ำ` depth points are a start |
-| **Pump capacity** | 1 m³/s every station, start 0.5 m / stop 0.1 m sump depth | `VITE_PUMP_RATED_M3S`, `VITE_PUMP_START_DEPTH_M`, `VITE_PUMP_STOP_DEPTH_M` | Rated flow and float-switch levels per station (the survey records names only) |
+| **Levelled inverts** | 58 % from depth measurements, then graded back from the outfalls at a minimum fall; no true invert levels exist in the survey | `nodes.invert[]`, `DRAIN_MIN_GRADE` | Levelled inverts with slopes. **The biggest single unknown**: the sensor check above pins the remaining error on how much the laterals can carry, which is what inverts decide |
+| **Pump capacity, the other 54** | 1 m³/s each, start 0.5 m / stop 0.1 m sump depth; the 8 the plan names are now rated | `VITE_PUMP_RATED_M3S`, `VITE_PUMP_START_DEPTH_M`, `VITE_PUMP_STOP_DEPTH_M` | Ratings and float-switch levels for the rest, and a surveyed position for the Khao Noi station (placed from the plan's description). Rating the big eight moved a design storm little - the water cannot reach the pumps fast enough - so this matters *after* the inverts are known |
 | **Inlet clogging** | 50 % of every grate blocked | `VITE_INLET_CLOGGING` | Inspection data; realistically seasonal |
-| **Grate size** | 0.4 x 0.6 m where the survey has none; 50 % open area | `DEFAULT_GRATE_M`, `GRATE_OPEN_FRACTION` in `build-drainage-model.py` -> `inlets.perimeterM/openAreaM2` | Survey the unsized grates; 307 grates are also unattached (no pipe within 40 m or street within 25 m) |
-| **Street patch area** | 120 m² per junction, everywhere | `VITE_STREET_PATCH_M2`; sets depth-for-volume and the volume moved per link | Road width x junction spacing from `roadcl_arc` (`RC_WIDTH`, `S_WIDTH`) |
-| **Infiltration** | Horton 60 -> 12 mm/h, k = 2/h (sandy loam); pervious 5 % of a street patch, 35 % of the strip | `VITE_INFILTRATION_F0_MM_H`, `VITE_INFILTRATION_FC_MM_H`, `VITE_INFILTRATION_K_PER_H`, `VITE_PERVIOUS_STREET`, `VITE_PERVIOUS_STRIP` | Soil map or infiltrometer tests; pervious share from land cover |
+| **Grate size** | 0.4 x 0.6 m where the survey has none; 50 % open area | `DEFAULT_GRATE_M`, `GRATE_OPEN_FRACTION` | Survey the unsized grates; 307 grates are also unattached (no pipe within 40 m or street within 25 m) |
+| **Infiltration** | Horton 60 -> 12 mm/h, k = 2/h (sandy loam); pervious 5 % of a street patch, 35 % of the strip | `VITE_INFILTRATION_*`, `VITE_PERVIOUS_*` | Soil map or infiltrometer tests; pervious share from land cover |
+| **Sub-metre relief** | 2 m contour interval: right for where water goes, too coarse for how deep it stands | the contour surface | Levelling or LiDAR. The 0.69 m MAE is the floor on ponding depth accuracy until then |
 
 ### Tier 2 - shape the answer noticeably
 
@@ -653,12 +798,9 @@ would replace it.
 | Catchment strip width | 60 m either side of a street, 90 % runoff | `VITE_STREET_CATCHMENT_WIDTH_M`, `VITE_STREET_RUNOFF_COEFF` | Block/parcel geometry; runoff coefficient by land cover |
 | Generic drain outside the survey | 150 mm/h per patch (a capacity) | `VITE_STREET_DRAIN_MM_H` | Extend the drain survey, or nothing - it is a stand-in |
 | Sea / canal / free outfalls | coast within 250 m = sea; OSM waterway within 40 m = canal; 49 networks got their lowest dead end declared an outfall | `DRAIN_SEA_OUTFALL_M`, `DRAIN_CANAL_OUTFALL_M`, `nodes.kind[]`, `nodes.assumedOutfall[]` | Confirm each outfall and which have flap valves (`VITE_OUTFALL_FLAP_VALVE` is one global switch) |
-| Street sea outfalls | dead ends at or below 1.5 m meet the tide | `VITE_SEA_OUTFALL_MAX_ELEV_M` | Coastline-based classification once heights are real |
 | Pipe roughness | n = 0.013 concrete, 0.011 HDPE/PVC | `MANNING_N` in `build-drainage-model.py` | Fine for new pipe; aged or silted concrete runs 0.015-0.02 |
 | Street roughness, speed, kerb | n = 0.015, v <= 3 m/s, kerb 0.15 m | `VITE_STREET_MANNING_N`, `VITE_STREET_MAX_FLOW_MS`, `VITE_STREET_CURB_M` | Standard values; kerb height varies by road |
 | Pipe size where unparseable | Ø0.60 m | `DEFAULT_SIZE_M` | Survey; the four "pressure main" runs are also treated as gravity pipes |
-| Manhole shaft area | 1 m² where the cover survey has no dimensions (~68k of 80k covers) | `DEFAULT_SHAFT_M2` -> `nodes.shaftM2[]` | Survey |
-| Tide datum | COP30 heights (EGM2008) taken as metres above local MSL, no offset | `src/tide.js` | The offset between EGM2008 and Ko Sichang MSL - decimetres, and it matters at the outfalls |
 
 ### Tier 3 - numerical or scenario choices
 
@@ -691,4 +833,7 @@ reproduce the first from real rain at the second.
 - Drainage network (pipes and covers): Pattaya City GIS geodatabase
   (`Data_Pattaya.gdb`, feature datasets `drain` / `water_pipe`), extracted to
   WGS84 GeoJSON by `scripts/extract-drainage.py`
-- Sensor stations: SMART GIS database export
+- Sensor stations and their level archives: SMART GIS database export
+  (58 stations, 6-minute levels, May-August 2026; used to calibrate the street drainage)
+- Pump capacities, drainage capacity per area and flood routes: Pattaya City
+  Sanitary Engineering Office flood-response plan (`004.การรับมือปัญหาน้ำท่วมเมืองพัทยา`)

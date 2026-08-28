@@ -4,6 +4,9 @@ Geodatabase to the compact WGS84 GeoJSON the map loads.
   drainage_line  -> public/data/drainage-pipes.geojson   gravity drains + culverts
   drainage_point -> public/data/drainage-covers.geojson  manholes / inlet covers
   pumpstation    -> public/data/drainage-pumps.geojson   pump stations (name only)
+  ความลึกหลังท่อระบายน้ำ -> public/data/drainage-depths.geojson  depth to the back
+                                                          of the drain, 9k points
+  ผังบ่อสูบน้ำ_polygon   -> public/data/drainage-sumps.geojson   pump sump footprints
 
 The three files are also the input of scripts/build-drainage-model.py, which
 turns them into the pipe graph the water simulation runs on.
@@ -65,6 +68,12 @@ COVER_FIELDS = [
 # no start level. Those are model settings for now (see config.js).
 PUMP_FIELDS = [
     ('STA_NAME', 'name'),
+]
+# How deep the drain sits below the ground it runs under. The only depth
+# measurement the survey carries for the pipes themselves, so it is what the
+# pipe model's invert levels are built from where a manhole depth is missing.
+DEPTH_FIELDS = [
+    ('DEPTH_M', 'depth_m'),
 ]
 
 
@@ -163,6 +172,54 @@ def extract_pumps():
     return features
 
 
+def extract_points(layer, spec):
+    """Any point layer, as points with the fields `spec` names."""
+    geom, fields = read(layer)
+    geoms = from_wkb(geom)
+    features = []
+    for i, g in enumerate(geoms):
+        if g is None or g.is_empty:
+            continue
+        coords = get_coordinates(g)
+        if len(coords) == 0:
+            continue
+        props = properties(fields, i, spec)
+        if not props:
+            continue
+        features.append({
+            'type': 'Feature',
+            'properties': props,
+            'geometry': {'type': 'Point', 'coordinates': to_lonlat(coords[:1, 0], coords[:1, 1])[0]},
+        })
+    return features
+
+
+def extract_sumps():
+    """Pump sump footprints, as their centre and their plan area. The area is
+    what a pump's sump can actually hold water over; the model otherwise
+    assumes a one-square-metre shaft like any other manhole."""
+    geom, fields = read('ผังบ่อสูบน้ำ_polygon')
+    geoms = from_wkb(geom)
+    features = []
+    for i, g in enumerate(geoms):
+        if g is None or g.is_empty:
+            continue
+        centre = g.centroid
+        props = {'area_m2': round(float(g.area), 1)}
+        name = clean(fields['RefName'][i]) if 'RefName' in fields else None
+        if name:
+            props['name'] = name
+        features.append({
+            'type': 'Feature',
+            'properties': props,
+            'geometry': {
+                'type': 'Point',
+                'coordinates': to_lonlat([centre.x], [centre.y])[0],
+            },
+        })
+    return features
+
+
 def write(features, name):
     OUT.mkdir(parents=True, exist_ok=True)
     path = OUT / name
@@ -181,3 +238,5 @@ if not Path(GDB).exists():
 write(extract_pipes(), 'drainage-pipes.geojson')
 write(extract_covers(), 'drainage-covers.geojson')
 write(extract_pumps(), 'drainage-pumps.geojson')
+write(extract_points('ความลึกหลังท่อระบายน้ำ', DEPTH_FIELDS), 'drainage-depths.geojson')
+write(extract_sumps(), 'drainage-sumps.geojson')

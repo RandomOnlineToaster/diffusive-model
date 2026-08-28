@@ -81,6 +81,18 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
   const isPump = nodes.pump
     ? Uint8Array.from(nodes.pump)
     : Uint8Array.from(nodes.kind, (k) => (k === NODE_PUMP ? 1 : 0));
+  // Each pump's rated flow: the city plan's figure where the build found
+  // one, else the configured default. 0 in this array means "use default",
+  // read at step time so the setting can still be tried live.
+  const pumpRated = new Float64Array(nodeCount);
+  if (model.pumps?.node && model.pumps?.ratedM3s) {
+    model.pumps.node.forEach((n, index) => {
+      const rate = model.pumps.ratedM3s[index];
+      if (Number.isFinite(rate) && rate > 0) {
+        pumpRated[n] = rate;
+      }
+    });
+  }
   const street = Int32Array.from(nodes.street);
   const shaftM2 = Float64Array.from(nodes.shaftM2);
   const ground = new Float64Array(nodeCount);
@@ -187,6 +199,9 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
   const boundaryOut = new Float64Array(nodeCount); // this substep's proposed outfall discharge, m3
   const boundaryFlow = new Float64Array(nodeCount); // over the step: + out to sea/free, - in from the sea
   const pumpRunning = new Uint8Array(nodeCount);
+  // What each station has lifted this run, for its marker's popup.
+  const pumpedByNode = new Float64Array(nodeCount);
+  const pumpNodes = model.pumps?.node ? Int32Array.from(model.pumps.node) : new Int32Array(0);
 
   let inflowM3 = 0;
   let dischargedM3 = 0;
@@ -284,9 +299,16 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
     openAreaM2: Float64Array.from(model.inlets.openAreaM2)
   };
 
-  // Street junctions inside the surveyed area, where the inlets ARE the
-  // drainage: the generic per-junction drain term stays only outside it.
-  const covered = streets ? coverStreets(streets, lat, lng, config.drainCoverageRadiusM) : null;
+  // Street junctions the inlets serve. Those ARE the drainage where they
+  // exist, so the generic per-junction drain term stays only where they do
+  // not - which is exactly the junctions with no inlet, not a radius around
+  // the network that would leave some streets with no way down at all.
+  const covered = streets ? new Uint8Array(streets.nodeCount) : null;
+  if (covered) {
+    for (let k = 0; k < inlets.count; k += 1) {
+      covered[inlets.street[k]] = 1;
+    }
+  }
 
   // Pipe junctions bucketed for point queries (popup readouts).
   const NEAR_CELL_DEG = 0.001;
@@ -328,6 +350,7 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
       conduitRate.fill(0);
       boundaryFlow.fill(0);
       pumpRunning.fill(0);
+      pumpedByNode.fill(0);
       inflowM3 = 0;
       dischargedM3 = 0;
       backflowM3 = 0;
@@ -342,6 +365,7 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
       return {
         vol: Float32Array.from(volM3),
         pumps: Uint8Array.from(pumpRunning),
+        pumped: Float64Array.from(pumpNodes, (n) => pumpedByNode[n]),
         totals: { inflowM3, dischargedM3, backflowM3, pumpedM3, spilledM3, spilledLostM3 }
       };
     },
@@ -351,6 +375,12 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
       clearActive();
       volM3.set(snap.vol);
       pumpRunning.set(snap.pumps);
+      pumpedByNode.fill(0);
+      if (snap.pumped) {
+        pumpNodes.forEach((n, i) => {
+          pumpedByNode[n] = snap.pumped[i];
+        });
+      }
       ({ inflowM3, dischargedM3, backflowM3, pumpedM3, spilledM3, spilledLostM3 } = snap.totals);
       conduitRate.fill(0);
       boundaryFlow.fill(0);
@@ -579,10 +609,12 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
             const running =
               pumpRunning[n] === 1 ? depth > config.pumpStopDepthM : depth >= config.pumpStartDepthM;
             pumpRunning[n] = running ? 1 : 0;
-            if (running && config.pumpRatedM3s > 0) {
-              const lifted = Math.min(next, config.pumpRatedM3s * dtSub);
+            const rated = pumpRated[n] > 0 ? pumpRated[n] : config.pumpRatedM3s;
+            if (running && rated > 0) {
+              const lifted = Math.min(next, rated * dtSub);
               next -= lifted;
               pumpedM3 += lifted;
+              pumpedByNode[n] += lifted;
             }
           }
 
@@ -668,6 +700,18 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
      * The nearest junction within radiusM of a point, with its state, or
      * null. For the map's sample-point popup.
      */
+    /** A pump station's live state, for its marker. */
+    pumpState(n) {
+      const rated = pumpRated[n] > 0 ? pumpRated[n] : config.pumpRatedM3s;
+      return {
+        running: pumpRunning[n] === 1,
+        depthM: lowArea[n] > 0 ? volM3[n] / lowArea[n] : 0,
+        ratedM3s: rated,
+        pumpedM3: pumpedByNode[n],
+        surcharged: volM3[n] > lowVolume[n]
+      };
+    },
+
     nearestNode(latQ, lngQ, radiusM = 60) {
       const cosLat = Math.cos((latQ * Math.PI) / 180);
       const cellLat = Math.floor(latQ / NEAR_CELL_DEG);
@@ -709,7 +753,8 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
         surcharged: volM3[best] > lowVolume[best],
         sizeText: c < 0 ? null : shape[c] === 1 ? `${widthM[c]}×${heightM[c]} m box` : `Ø${widthM[c]} m`,
         pump: isPump[best] === 1,
-        pumpRunning: pumpRunning[best] === 1
+        pumpRunning: pumpRunning[best] === 1,
+        pumpRatedM3s: isPump[best] === 1 ? (pumpRated[best] > 0 ? pumpRated[best] : config.pumpRatedM3s) : 0
       };
     }
   };
@@ -723,52 +768,4 @@ function countKind(values, wanted) {
     }
   }
   return count;
-}
-
-/**
- * Which street junctions lie within radiusM of any pipe junction: a 1 where
- * the surveyed network reaches, 0 beyond it.
- */
-function coverStreets(streets, pipeLat, pipeLng, radiusM) {
-  const cellDeg = radiusM / 110574;
-  const buckets = new Map();
-  const keyOf = (la, ln) => Math.floor(la / cellDeg) * 400000 + Math.floor(ln / cellDeg);
-  for (let p = 0; p < pipeLat.length; p += 1) {
-    const key = keyOf(pipeLat[p], pipeLng[p]);
-    const bucket = buckets.get(key);
-    if (bucket) {
-      bucket.push(p);
-    } else {
-      buckets.set(key, [p]);
-    }
-  }
-
-  const covered = new Uint8Array(streets.nodeCount);
-  const radiusSq = radiusM * radiusM;
-  for (let n = 0; n < streets.nodeCount; n += 1) {
-    const la = streets.lat[n];
-    const ln = streets.lng[n];
-    const cosLat = Math.cos((la * Math.PI) / 180);
-    const baseLa = Math.floor(la / cellDeg);
-    const baseLn = Math.floor(ln / cellDeg);
-    let found = false;
-    for (let dLa = -1; dLa <= 1 && !found; dLa += 1) {
-      for (let dLn = -1; dLn <= 1 && !found; dLn += 1) {
-        const bucket = buckets.get((baseLa + dLa) * 400000 + (baseLn + dLn));
-        if (!bucket) {
-          continue;
-        }
-        for (const p of bucket) {
-          const dy = (pipeLat[p] - la) * 110574;
-          const dx = (pipeLng[p] - ln) * 111320 * cosLat;
-          if (dx * dx + dy * dy <= radiusSq) {
-            found = true;
-            break;
-          }
-        }
-      }
-    }
-    covered[n] = found ? 1 : 0;
-  }
-  return covered;
 }

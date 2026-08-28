@@ -77,7 +77,10 @@ function balance(net, spilled) {
     onSpill: (s, m3) => spills.push([s, m3])
   });
   check('stats: 4 junctions, 2 conduits, 1 sea outfall, 1 pump', net.stats.nodes === 4 && net.stats.conduits === 2 && net.stats.seaOutfalls === 1 && net.stats.pumps === 1);
-  check('coverage marks the three street junctions', net.stats.coveredStreets === 3);
+  // "Covered" means a street junction the inlets serve - only those give up
+  // the generic drain term - so it is one per inlet, not a radius around the
+  // network that would leave a street inside it with no way down at all.
+  check('coverage marks the one street junction with an inlet', net.stats.coveredStreets === 1);
 
   const taken = net.offer(0, 2);
   check('2 m3 fits in an empty manhole', taken === 2);

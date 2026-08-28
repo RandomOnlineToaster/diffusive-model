@@ -14,15 +14,25 @@ behind an environment variable so better data can replace it later:
 
   * pipe ends are snapped together within DRAIN_SNAP_M to make junctions, and
     a run ending on the side of another run becomes a T-junction;
-  * ground level at a junction is the nearest street junction's DEM height,
-    and the pipe invert is that minus PIPE_COVER_DEPTH_M minus the pipe height
-    (no invert levels are surveyed yet);
+  * ground level at a junction is the nearest street junction's height, and
+    the invert is measured from it where the survey says how deep the drain
+    runs - a manhole depth (DEEP_MH, 10.6k covers) first, else the depth to
+    the back of the drain (9k points) plus the pipe height - falling back to
+    PIPE_COVER_DEPTH_M where neither is near. The survey carries no levelled
+    inverts, so none of these are true invert levels;
   * a run end within DRAIN_SEA_OUTFALL_M of the coast is a sea outfall (its
     water level is the tide), one within DRAIN_CANAL_OUTFALL_M of an OSM
     waterway is a canal outfall (free discharge), and a network with neither
     gets its lowest dead end declared a free outfall so it can drain at all;
-  * a grated cover is an inlet into the nearest pipe junction, fed by the
-    nearest street junction, with a weir/orifice capacity from its grate size.
+  * every street junction the drain runs under gets an inlet into it, sized
+    from the grated covers beside it where the survey recorded any and from a
+    default kerb opening where it did not. The survey classes only 3,800 of
+    its 79,929 covers as gratings, which would leave one inlet per seventeen
+    street junctions - and the city's own road sensors show streets shedding
+    a metre of water in about a quarter of an hour, which one inlet per
+    seventeen junctions cannot do and one opening per junction can. A Thai
+    street drain is a covered trench along the kerb, taking water all along
+    itself, not at a handful of gratings.
 
 Run: npm run build:drainage   (after build:roads, whose node numbering it uses)
 """
@@ -31,6 +41,7 @@ import math
 import os
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +51,8 @@ DATA = ROOT / 'public' / 'data'
 PIPES_PATH = DATA / 'drainage-pipes.geojson'
 COVERS_PATH = DATA / 'drainage-covers.geojson'
 PUMPS_PATH = DATA / 'drainage-pumps.geojson'
+DEPTHS_PATH = DATA / 'drainage-depths.geojson'
+SUMPS_PATH = DATA / 'drainage-sumps.geojson'
 ROADS_PATH = DATA / 'chonburi-road-network.json'
 RIVERS_PATH = DATA / 'chonburi-rivers.geojson'
 BOUNDARY_PATH = ROOT / 'data' / 'chonburi.geojson'
@@ -51,9 +64,73 @@ SEA_OUTFALL_M = float(os.environ.get('DRAIN_SEA_OUTFALL_M', 250.0))
 CANAL_OUTFALL_M = float(os.environ.get('DRAIN_CANAL_OUTFALL_M', 40.0))
 INLET_TO_PIPE_M = 40.0
 INLET_TO_STREET_M = 25.0
+# A street junction this close to a drain junction sheds into it.
+STREET_TO_PIPE_M = float(os.environ.get('DRAIN_STREET_INLET_M', 35.0))
+# The kerb opening assumed at a junction the survey recorded no grating for:
+# open area in m2 and wetted perimeter in m. Calibrated against the road
+# sensors - see the note at the top - and overridable while that is checked.
+KERB_INLET_AREA_M2 = float(os.environ.get('KERB_INLET_AREA_M2', 0.30))
+KERB_INLET_PERIMETER_M = float(os.environ.get('KERB_INLET_PERIMETER_M', 2.4))
 NODE_TO_STREET_M = 60.0
 PUMP_TO_PIPE_M = 80.0
 MANHOLE_TO_PIPE_M = 5.0
+# How far a junction may look for a measured depth before it falls back to
+# the assumed cover. A manhole depth is the better measurement - it is the
+# depth of the chamber the pipes meet in - so it is looked for first, and
+# closer, than the depth to the back of the drain.
+MANHOLE_DEPTH_SEARCH_M = 15.0
+DRAIN_DEPTH_SEARCH_M = 30.0
+# A pump's sump footprint counts as its shaft area if it is this near.
+SUMP_TO_PUMP_M = 120.0
+# A drain is laid to fall towards its outfall, deepening as it goes; it does
+# not follow the ground. Measured depths give the depth at a point, not that
+# fall, so on a flat city they leave a pipe with nowhere to send its water -
+# 22% of the runs came out flatter than 1 in 1000. This is the least fall a
+# run is given, working back from its outfall, and it is only imposed where
+# the pipe can still be buried.
+MIN_GRADE = float(os.environ.get('DRAIN_MIN_GRADE', 0.0015))
+MIN_COVER_M = 0.15
+
+# Pump station capacities, from the city's flood-response plan
+# (004.การรับมือปัญหาน้ำท่วมเมืองพัทยา, สำนักช่างสุขาภิบาล, slides 32-37).
+# Matched to the survey's station names by the pattern given; stations the
+# plan does not list keep the configured default at run time. The survey
+# records names only, so this is the only source of rated flows there is.
+#   Sump 1-6  the stormwater sumps along Sukhumvit and the railway road,
+#             pumping to the 100,000 m3 retention pond (แก้มลิง)
+#   PS7       the beach pumping station by Walking Street, 2 x 18,000 m3/h
+#   PSK       Khlong Pluk Plub, 3 x 9,000 m3/h
+#   Khao Noi  the railway-road flood pump station, 6 x 3,600 m3/h
+PUMP_RATES_M3S = [
+    (r'SUMP\s*1\b', 1.65),
+    (r'SUMP\s*2\b', 0.99),
+    (r'SUMP\s*3\b', 0.99),
+    (r'SUMP\s*4\b', 1.98),
+    (r'SUMP\s*5\b', 3.30),
+    (r'SUMP\s*6\b', 3.30),
+    (r'\bPS\s*7\b', 2 * 18000 / 3600),
+    (r'ปึกพลับ|ปลึกพลับ|\bPSK\b', 3 * 9000 / 3600),
+    (r'เขาน้อย', 6 * 3600 / 3600),
+]
+
+
+def rated_flow(name):
+    """The plan's rated flow for a station name, or None."""
+    text = str(name or '')
+    for pattern, rate in PUMP_RATES_M3S:
+        if re.search(pattern, text, re.I):
+            return rate
+    return None
+
+
+# Stations the plan describes that the survey's pump layer does not carry.
+# The plan gives no coordinates, only a description: Khao Noi is "on the
+# railway road" (slide 37), and Sump 3 sits on the same road "near the Khao
+# Noi junction", so it is placed on the railway road just south of Sump 3.
+# Move it when the station is surveyed; the marker says it is approximate.
+EXTRA_PUMPS = [
+    {'name': 'สถานีสูบน้ำเขาน้อย', 'lng': 100.9031, 'lat': 12.9220},
+]
 GRATE_OPEN_FRACTION = 0.5
 DEFAULT_GRATE_M = (0.4, 0.6)
 DEFAULT_SHAFT_M2 = 1.0
@@ -343,7 +420,55 @@ def main():
     for a, b, h in zip(con_from, con_to, con_h):
         height_at[a] = max(height_at[a], h)
         height_at[b] = max(height_at[b], h)
-    invert = ground - COVER_DEPTH_M - height_at
+
+    # --- inverts, from whatever depth the survey measured nearby ----------
+    def depth_index(features, key, low, high):
+        xs, ys, ds = [], [], []
+        for feature in features:
+            value = feature['properties'].get(key)
+            if not isinstance(value, (int, float)) or not (low <= value <= high):
+                continue
+            lng, lat = feature['geometry']['coordinates']
+            x, y = frame.to_xy(lng, lat)
+            xs.append(x)
+            ys.append(y)
+            ds.append(float(value))
+        return (PointIndex(xs, ys, 30.0) if xs else None), np.asarray(ds)
+
+    mh_index, mh_depth = depth_index(covers, 'depth_m', 0.2, 8.0)
+    depth_features = (load_json(DEPTHS_PATH, required=False) or {'features': []})['features']
+    dr_index, dr_depth = depth_index(depth_features, 'depth_m', 0.05, 6.0)
+    print(f'{len(mh_depth):,} manhole depths and {len(dr_depth):,} drain depths to measure inverts from')
+
+    invert = np.zeros(node_count)
+    invert_source = np.zeros(node_count, dtype=int)  # 0 assumed, 1 manhole, 2 drain depth
+    for n in range(node_count):
+        depth = None
+        if mh_index is not None:
+            k, _ = mh_index.nearest(node_x[n], node_y[n], MANHOLE_DEPTH_SEARCH_M)
+            if k >= 0:
+                # A manhole depth is measured to the bottom of the chamber,
+                # which is where the pipes run: it IS the invert depth.
+                depth = mh_depth[k]
+                invert_source[n] = 1
+        if depth is None and dr_index is not None:
+            k, _ = dr_index.nearest(node_x[n], node_y[n], DRAIN_DEPTH_SEARCH_M)
+            if k >= 0:
+                # This one is measured to the back (crown) of the pipe, so the
+                # bore hangs below it.
+                depth = dr_depth[k] + height_at[n]
+                invert_source[n] = 2
+        if depth is None:
+            depth = COVER_DEPTH_M + height_at[n]
+        # However it was measured, the pipe cannot break the surface.
+        invert[n] = min(ground[n] - depth, ground[n] - height_at[n])
+
+    measured = int((invert_source > 0).sum())
+    print(
+        f'inverts: {int((invert_source == 1).sum()):,} from a manhole depth, '
+        f'{int((invert_source == 2).sum()):,} from a drain depth, '
+        f'{node_count - measured:,} assumed ({100 * measured / node_count:.0f}% measured)'
+    )
 
     slopes = []
     for a, b, length in zip(con_from, con_to, con_len):
@@ -386,10 +511,12 @@ def main():
         return (a if da <= db else b), best_d
 
     shaft = np.full(node_count, DEFAULT_SHAFT_M2)
-    inlet_node, inlet_street, inlet_perimeter, inlet_area = [], [], [], []
+
+    # Manhole chambers size the junctions they sit on, and any grated cover
+    # lends its opening to the street junction nearest it.
+    grate_area = defaultdict(float)
+    grate_perimeter = defaultdict(float)
     grated = 0
-    unmatched_pipe = 0
-    unmatched_street = 0
     for cover in covers:
         props = cover['properties']
         lng, lat = cover['geometry']['coordinates']
@@ -404,13 +531,8 @@ def main():
         if props.get('cover') not in INLET_MATERIALS:
             continue
         grated += 1
-        k, _ = nearest_junction_by_conduit(x, y, INLET_TO_PIPE_M)
-        if k < 0:
-            unmatched_pipe += 1
-            continue
         s, _ = road_index.nearest(x, y, INLET_TO_STREET_M)
         if s < 0:
-            unmatched_street += 1
             continue
 
         dia = props.get('cover_dia')
@@ -425,12 +547,34 @@ def main():
             w, l = DEFAULT_GRATE_M
             perimeter = 2 * (w + l)
             area = w * l * GRATE_OPEN_FRACTION
+        grate_area[s] += area
+        grate_perimeter[s] += perimeter
+
+    # One inlet per street junction the drain runs under. Where the survey
+    # recorded gratings beside that junction they are its opening; where it
+    # did not, the kerb opening a covered trench has anyway.
+    inlet_node, inlet_street, inlet_perimeter, inlet_area = [], [], [], []
+    from_survey = 0
+    for s in range(len(road_x)):
+        k, _ = nearest_junction_by_conduit(road_x[s], road_y[s], STREET_TO_PIPE_M)
+        if k < 0:
+            continue
+        if s in grate_area:
+            area = grate_area[s]
+            perimeter = grate_perimeter[s]
+            from_survey += 1
+        else:
+            area = KERB_INLET_AREA_M2
+            perimeter = KERB_INLET_PERIMETER_M
         inlet_node.append(k)
         inlet_street.append(s)
-        inlet_perimeter.append(perimeter)
-        inlet_area.append(area)
-    print(f'{len(inlet_node):,} inlets from {grated:,} grated covers '
-          f'({unmatched_pipe} with no pipe within {INLET_TO_PIPE_M:.0f} m, {unmatched_street} with no street within {INLET_TO_STREET_M:.0f} m)')
+        inlet_perimeter.append(round(perimeter, 2))
+        inlet_area.append(round(area, 3))
+    print(
+        f'{len(inlet_node):,} inlets - one per street junction within {STREET_TO_PIPE_M:.0f} m of a drain '
+        f'({from_survey:,} sized by surveyed gratings out of {grated:,}, the rest a '
+        f'{KERB_INLET_AREA_M2:.2f} m2 kerb opening)'
+    )
 
     # --- 5. outfalls ----------------------------------------------------------
     kind = np.zeros(node_count, dtype=int)  # 0 manhole, 1 sea outfall, 2 free outfall
@@ -488,19 +632,64 @@ def main():
                     canal += 1
 
     # Pumps: the nearest junction to each station becomes a pumped node.
-    pump_node, pump_name = [], []
+    pump_node, pump_name, pump_rate = [], [], []
+    pump_lat, pump_lng, pump_approx = [], [], []
     unmatched_pumps = []
-    for pump in pumps:
+    stations = list(pumps) + [
+        {'geometry': {'coordinates': [p['lng'], p['lat']]}, 'properties': {'name': p['name'], 'approx': True}}
+        for p in EXTRA_PUMPS
+    ]
+    for pump in stations:
         lng, lat = pump['geometry']['coordinates']
         x, y = frame.to_xy(lng, lat)
-        k, _ = nearest_junction_by_conduit(x, y, PUMP_TO_PIPE_M)
         name = pump['properties'].get('name') or 'pump station'
+        approx = bool(pump['properties'].get('approx', False))
+        # A station placed from a description is allowed a wider reach to the
+        # drain it serves than a surveyed point is.
+        k, dist = nearest_junction_by_conduit(x, y, PUMP_TO_PIPE_M * (4 if approx else 1))
+        if approx and (k < 0 or k in pump_node):
+            # Its nearest drain end may already be another station's (Khao
+            # Noi shares the railway-road trunk with Sump 3): take the
+            # nearest junction that is still free.
+            d_all = np.hypot(np.asarray(node_x, dtype=float) - x, np.asarray(node_y, dtype=float) - y)
+            for cand in np.argsort(d_all):
+                if d_all[cand] > PUMP_TO_PIPE_M * 4:
+                    break
+                if int(cand) not in pump_node:
+                    k, dist = int(cand), float(d_all[cand])
+                    break
         if k < 0 or k in pump_node:
             unmatched_pumps.append(name)
             continue
+        if approx:
+            print(f'  {name}: placed from the plan, {dist:.0f} m from the nearest drain')
         is_pump[k] = 1
         pump_node.append(k)
         pump_name.append(name)
+        pump_rate.append(rated_flow(name))
+        pump_lat.append(round(float(lat), 6))
+        pump_lng.append(round(float(lng), 6))
+        pump_approx.append(approx)
+    rated = [(n, r) for n, r in zip(pump_name, pump_rate) if r is not None]
+    print(f'{len(rated)} pump stations carry a rated flow from the city plan: '
+          + ', '.join(f'{n} {r:.2f} m3/s' for n, r in rated))
+
+    # A pump's sump is a tank, not a manhole shaft: its footprint is what the
+    # water it is holding back stands over.
+    sump_features = (load_json(SUMPS_PATH, required=False) or {'features': []})['features']
+    sized = 0
+    for sump in sump_features:
+        area = sump['properties'].get('area_m2')
+        if not isinstance(area, (int, float)) or not (1 <= area <= 20000):
+            continue
+        lng, lat = sump['geometry']['coordinates']
+        x, y = frame.to_xy(lng, lat)
+        k, _ = pipe_index.nearest(x, y, SUMP_TO_PUMP_M)
+        if k >= 0 and area > shaft[k]:
+            shaft[k] = area
+            sized += 1
+    if sump_features:
+        print(f'{sized} of {len(sump_features)} surveyed sump footprints sized a junction')
 
     # Networks with no way out get their lowest dead end declared an outfall.
     parent = list(range(node_count))
@@ -531,6 +720,50 @@ def main():
     print(f'{len(members):,} separate networks; outfalls: {sea} sea, {canal} canal, {forced} assumed (lowest dead end); '
           f'{len(pump_node)} pump stations matched' + (f', {len(unmatched_pumps)} not near a pipe' if unmatched_pumps else ''))
 
+    # --- 5b. give every run a fall towards its outfall -----------------------
+    #
+    # Walking out from the outfalls, each junction upstream is lifted to sit at
+    # least MIN_GRADE above the one below it - but never so high that the pipe
+    # would break the surface. The depths measure how deep the drain is at a
+    # point; this is the grade it was laid to, which no survey field carries.
+    adjacency = [[] for _ in range(node_count)]
+    for c in range(conduit_count):
+        adjacency[con_from[c]].append((con_to[c], con_len[c], con_h[c]))
+        adjacency[con_to[c]].append((con_from[c], con_len[c], con_h[c]))
+
+    import heapq
+
+    graded = invert.copy()
+    visited = np.zeros(node_count, dtype=bool)
+    queue = [(0.0, n) for n in range(node_count) if kind[n] != 0]
+    heapq.heapify(queue)
+    for _, n in queue:
+        visited[n] = True
+    lifted = 0
+    while queue:
+        distance, n = heapq.heappop(queue)
+        for m, length, pipe_h in adjacency[n]:
+            if visited[m]:
+                continue
+            visited[m] = True
+            # At least this far above its downstream neighbour, and still
+            # under the road.
+            wanted = graded[n] + MIN_GRADE * length
+            ceiling = ground[m] - pipe_h - MIN_COVER_M
+            target = min(max(graded[m], wanted), max(ceiling, graded[m]))
+            if target > graded[m] + 1e-6:
+                lifted += 1
+            graded[m] = target
+            heapq.heappush(queue, (distance + length, m))
+
+    invert = graded
+    slopes = np.array([abs(invert[a] - invert[b]) / L for a, b, L in zip(con_from, con_to, con_len)])
+    print(
+        f'graded towards the outfalls: {lifted:,} junctions lifted, slopes now median '
+        f'{np.median(slopes) * 100:.2f}%, {np.mean(slopes < 0.001) * 100:.0f}% flatter than 0.1% '
+        f'({int(visited.sum()):,} of {node_count:,} junctions reachable from an outfall)'
+    )
+
     # --- 6. write --------------------------------------------------------------
     node_lat = [round(frame.lat0 + y / frame.ky, 6) for y in node_y]
     node_lng = [round(frame.lng0 + x / frame.kx, 6) for x in node_x]
@@ -553,6 +786,7 @@ def main():
             'shaftM2': [round(float(v), 2) for v in shaft],
             'kind': [int(v) for v in kind],
             'pump': [int(v) for v in is_pump],
+            'invertSource': [int(v) for v in invert_source],
             'assumedOutfall': [int(v) for v in assumed],
             'street': [int(v) for v in street],
         },
@@ -578,6 +812,14 @@ def main():
             'count': len(pump_node),
             'node': pump_node,
             'name': pump_name,
+            # m3/s from the city plan, or null for the run-time default.
+            'ratedM3s': [None if r is None else round(r, 3) for r in pump_rate],
+            # Where the station itself is (the node is the junction it pumps
+            # from), and whether that position is the plan's description
+            # rather than a survey point.
+            'lat': pump_lat,
+            'lng': pump_lng,
+            'approx': pump_approx,
         },
         'stats': {
             'vertexJoins': vertex_joins,
