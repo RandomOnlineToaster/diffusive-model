@@ -1,4 +1,4 @@
-// Sanity checks for src/hydraulics.js against textbook values.
+// Sanity checks for src/hydro/hydraulics.js against textbook values.
 //
 // Run: node scripts/test-hydraulics.mjs
 // No framework - each check prints its numbers, and the process exits 1 if
@@ -17,7 +17,7 @@ import {
   SHAPE_BOX,
   SHAPE_CIRCULAR,
   stormSteering
-} from '../src/hydraulics.js';
+} from '../src/hydro/hydraulics.js';
 
 let failures = 0;
 

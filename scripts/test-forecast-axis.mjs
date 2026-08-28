@@ -1,9 +1,9 @@
-// Checks src/forecastAxis.js: a grid whose points skip different hours still
+// Checks src/sources/forecastAxis.js: a grid whose points skip different hours still
 // gets one correct axis, with each value under its own stamp.
 //
 // Run: node scripts/test-forecast-axis.mjs
 
-import { alignSeries, stepContaining } from '../src/forecastAxis.js';
+import { alignSeries, stepContaining } from '../src/sources/forecastAxis.js';
 
 let failures = 0;
 function check(label, condition, detail = '') {

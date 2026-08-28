@@ -41,23 +41,23 @@ storms and routes the resulting water across terrain and streets.
   flow, whether it is pumping and how much it has lifted. The covers are ~80k
   points, so that layer loads on first use and only draws once zoomed in to
   street level. A pump station lights up while it runs.
+- **Infrastructure layers** — rivers and canals, lakes and reservoirs, water
+  gates (OpenStreetMap), and the city's tunnel and pole level sensors.
 
 Every clickable thing on the map behaves the same way: hovering it shows a
 small name tip and the pointer cursor, clicking it opens the same detail
 card - a title, a label/value table, and where the data came from. That
 goes for pump stations, tunnel and pole sensors, water gates, TMD rain
 gauges, and the drainage pipes and covers alike.
-- **Infrastructure layers** — rivers, water bodies, water gates, a demo pipe
-  network (seeding the pipe simulation) and sensor stations.
 
 ## Drainage physics
 
 Everything below is a **calculation function with stated assumptions**, so
 better data - surveyed invert levels, real pump capacities, 2 m contours -
 can replace an assumption without touching the maths. The formulas live in
-`src/hydraulics.js` (pure, checked by `npm test`); the models in
-`src/pipeNetwork.js` (pipes), `src/roadFlow.js` (streets), `src/tide.js`,
-`src/wind.js` and `src/ensemble.js`.
+`src/hydro/hydraulics.js` (pure, checked by `npm test`); the models in
+`src/hydro/pipeNetwork.js` (pipes), `src/hydro/roadFlow.js` (streets), `src/sources/tide.js`,
+`src/sources/wind.js` and `src/sim/ensemble.js`.
 
 | Piece | What it does | Assumption until better data arrives |
 | --- | --- | --- |
@@ -65,7 +65,7 @@ can replace an assumption without touching the maths. The formulas live in
 | Pipe flow | Manning's equation on the **hydraulic grade line** between junctions, for the depth of flow in the pipe, in whichever direction the HGL slopes; a manhole is a tank (shaft + half of each pipe) that surcharges above the crown and spills onto its street at the lid | Shaft plan area from the cover survey where recorded, all 21 surveyed pump sumps from their footprints, else 1 m² |
 | Inlets | Each grated cover feeds the nearest conduit at min(weir, orifice) capacity for the standing depth, half blocked by litter (`VITE_INLET_CLOGGING`), and only while the manhole has room | Grate 0.4 x 0.6 m where the survey has no size |
 | Outfalls | A run end within 250 m of the coast is a **sea outfall** whose receiving level is the live sea level; one within 40 m of an OSM waterway is a canal outfall (free); a network with neither gets its lowest dead end as an outfall | Open outfalls: the tide flows back in (`VITE_OUTFALL_FLAP_VALVE`) |
-| Pumps | 62 of the 64 surveyed stations sit on the graph; each pumps its sump out above a start depth until a stop depth | Every station 1 m³/s (`VITE_PUMP_RATED_M3S`) - the survey records names only |
+| Pumps | 63 of the 65 stations (64 surveyed, Khao Noi placed from the city plan) sit on the graph; each pumps its sump out above a start depth until a stop depth | The 9 stations the city plan names run at its rated flows (0.99-10 m³/s); the rest 1 m³/s (`VITE_PUMP_RATED_M3S`) - the survey records names only |
 | Sea level | Open-Meteo Marine hourly sea level (tide + surge), read a little offshore at the moment on the scenario's clock; a synthetic harmonic tide when offline; a **surge slider** adds metres on top | COP30 heights ~ metres above MSL |
 | Streets | A street dead end **on the shore** (within 250 m of the zero-metre contour) and at or below 1.5 m meets the sea and drains against it - or takes it in when drowned; other dead ends discharge freely. Inside the surveyed area the inlets are the only way down; outside it the generic `VITE_STREET_DRAIN_MM_H` term stands in | 850 of them; the shoreline comes from the contours, the threshold is still a setting |
 | Infiltration | The pervious share of wet ground (5 % of a street patch, 35 % of the flood strip past the kerb) soaks on Horton's curve, 60 -> 12 mm/h | Sandy loam everywhere |
@@ -212,7 +212,7 @@ Under the storm readouts:
 
 ### 4. Rain a forecast instead
 
-Tick **Rain Forecast (Open-Meteo)** (or **(TMD)** with a token in
+Tick **Rain Forecast (OM)** - Open-Meteo - (or **(TMD)** with a token in
 `.env.local`) in the Weather box. The timeline in the panel shows the next
 days hour by hour; click or drag along it to look at any hour, and the map
 paints that hour's rain as a heatmap with the peak and day total beside it.
@@ -243,6 +243,59 @@ rainfall to 07:00 - the only measured ground truth on the map.
   simulator and models for scripting, e.g. `__waterMap.rainfall.advance(600)`
   steps ten minutes and `__waterMap.roadFlow.dynamic.totals()` prints the
   water balance.
+
+## Code layout
+
+`src/` is arranged by what each module is, not by when it was written:
+
+```
+src/
+  main.js              entry: the panel, the calculator card, the map
+  config.js            every tunable, read from .env (see .env.example)
+  app/                 the wiring - what refreshes on which event
+    map.js             builds every layer and model and connects them
+    outcomeControl.js  the Outcome bar: park an hour, Play goes there
+    flowWeighting.js   Flow Paths / Catchment re-weighted by the rain
+    drainageReadout.js the sea / wind / drains / absorbed tiles, surge slider
+    ensembleControl.js the Run ensemble button
+    samplePopup.js     the click-anywhere sample point
+    pipeRecolour.js    drain runs coloured by how full they run
+    layerControls.js   titles, hover hints and widths of the layer controls
+    extents.js         graph extents and cell areas
+  hydro/               the physics
+    hydraulics.js      pure formulas (Manning, inlets, Horton, tide, pumps)
+    roadFlow.js        water on the streets: stage-storage, Manning, exits
+    pipeNetwork.js     water in the drains: HGL, conduits, outfalls, pumps
+  sim/                 the scenario
+    rainfallSim.js     the simulator panel and clock, storm placement
+    storm.js           a storm cell; rainfallGrid.js the rain field
+    forecastRain.js    a forecast span rained onto the grid
+    outcomeTimeline.js snapshots every half hour, replayed on demand
+    ensemble.js        jittered replays -> flood probability
+  terrain/             the ground
+    terrain.js         DEM, slope, D8 flow direction, accumulation, contours
+    boundary.js        province masks and inside tests; geometry.js helpers
+    flow.js            Flow Direction / Flow Paths / Catchment layers
+    flowParticles.js   the particle renderings of those layers
+    elevationLayer.js, contourLayer.js
+  sources/             outside data, each with a fallback
+    tide.js            Open-Meteo Marine + harmonic tide
+    wind.js            Open-Meteo steering wind
+    forecast.js        Open-Meteo and TMD forecast grids; forecastAxis.js
+  layers/              things drawn on the map
+    detailCard.js      the one hover tip and detail card every marker shares
+    drainage.js        surveyed pipes and covers; pumpStations.js
+    waterways.js, waterGates.js, sensors.js, rainGauges.js
+    cloudCover.js, rainForecast.js (the forecast card and its two layers)
+    ponding.js, rainfallLayer.js (storm field, tracks and handles), basemaps.js, icons.js, labels.js
+  ui/                  the side panel
+    layout.js          the panel markup; outcomeBar.js; rainfallCalculator.js
+  lib/                 small shared helpers (loadJson.js)
+  styles/              base, simulator, forecast, map-layers, readouts
+```
+
+`scripts/` holds the data pipeline (Python and Node) and `npm test`'s checks;
+`public/data/` the datasets they produce; `data/` the province outline.
 
 ## Data pipeline
 
@@ -373,7 +426,7 @@ SI throughout (m, m², s, m³/s) except rain, which is quoted in mm/h.
 
 ### 1. Preparing the ground
 
-**DEM grids** (`scripts/build-dem-cache.py`, `src/terrain.js`). The 30 m COP30
+**DEM grids** (`scripts/build-dem-cache.py`, `src/terrain/terrain.js`). The 30 m COP30
 raster is resampled to a 512 × 512 analysis grid (~200 m cells) and a 256 ×
 256 contour grid. Before routing, depressions are filled by *priority-flood*
 (Barnes et al. 2014): every cell is raised to the lowest level from which it
@@ -386,7 +439,7 @@ cell, so a cell's value is the number of cells - or the mm of water - draining
 through it. Contours are marching squares at 5/10/20/50 m intervals.
 
 **Street graph** (`scripts/build-road-network.py`, `scripts/refine-road-network.py`,
-`src/roadFlow.js`). OSM streets become a graph of 266k junctions and 273k
+`src/hydro/roadFlow.js`). OSM streets become a graph of 266k junctions and 273k
 links; extra points are inserted every 20 m so height can vary along a
 street. Heights start as **bilinear** COP30 samples and are then replaced,
 for the 82 % of junctions the city survey reaches, by a surface interpolated
@@ -433,7 +486,7 @@ covers become inlets on the nearest conduit with perimeter `2(w + l)` (or
 
 ### 2. Rain
 
-**Storm cells** (`src/storm.js`, `src/rainfallGrid.js`) are Gaussians on a
+**Storm cells** (`src/sim/storm.js`, `src/sim/rainfallGrid.js`) are Gaussians on a
 400 × 400 grid over the DEM bounds (~260 m cells):
 
     I(d) = Imax · exp(−d² / 2σ²)     for d < rain radius, else 0
@@ -451,7 +504,7 @@ e^(−dt/τ))`, which is why a whole forecast hour can be integrated in one call
 This field only weights the grid flow layers (Flow Paths / Accumulation) and
 forecast Street Flow; the street ponding model takes the rain rate directly.
 
-**Forecast rain** (`src/forecastRain.js`). Each forecast cell's "mm between T
+**Forecast rain** (`src/sim/forecastRain.js`). Each forecast cell's "mm between T
 and T + 1 h" becomes a steady rate `mm / hours` over that hour, laid onto the
 rain grid by **bilinear interpolation** between the four forecast cells around
 each rain-grid cell (a forecast cell is one figure for 10-35 km of country;
@@ -462,7 +515,7 @@ placed at the middle of each slice so its track is even. Scrubbing backwards
 re-rains the span from its start, so what is on screen is a pure function of
 (span start, moment shown, storms).
 
-### 3. Water on the streets (`src/roadFlow.js`)
+### 3. Water on the streets (`src/hydro/roadFlow.js`)
 
 State is a **volume** per junction. The ground a junction stands for is its
 surveyed carriageway width times half of every street running into it -
@@ -509,7 +562,7 @@ Water leaves a junction four ways, in this order each step:
 
 Severity colours are fixed depth stops: 0.5 cm (drawn), 5, 15, 30, 50 cm.
 
-### 4. Water in the drains (`src/pipeNetwork.js`, `src/hydraulics.js`)
+### 4. Water in the drains (`src/hydro/pipeNetwork.js`, `src/hydro/hydraulics.js`)
 
 State is a volume per manhole; from it comes the water level - the
 **hydraulic grade line** (HGL). A manhole is a tank: below the crown of its
@@ -538,7 +591,7 @@ valves are switched on. A **free outfall** always drains to `invert − 0.3`.
 **Pumps** start at 0.5 m sump depth and stop at 0.1 m, lifting 1 m³/s out of
 the system.
 
-### 5. Sea level and wind (`src/tide.js`, `src/wind.js`)
+### 5. Sea level and wind (`src/sources/tide.js`, `src/sources/wind.js`)
 
 Sea level at the outfalls is Open-Meteo Marine's hourly `sea_level_height_msl`
 (tide + surge), interpolated at the moment on the scenario's clock (the storm
@@ -555,7 +608,7 @@ wind where the model serves it. A new storm cell moves *towards* `direction +
 180°` at `0.75 × the 850 hPa speed` (or `0.75 × 1.5 × the 10 m speed`);
 directions are interpolated as vectors so 350° → 10° passes through north.
 
-### 6. Ensemble (`src/ensemble.js`)
+### 6. Ensemble (`src/sim/ensemble.js`)
 
 `Run ensemble` replays the placed storms N times from dry ground (default 8
 members × 3 h in 5-minute steps). Member 1 is the storms as placed; the others
@@ -806,15 +859,15 @@ half-metre heights, then the inlets.
 
 | Number | Now | Where |
 | --- | --- | --- |
-| Nominal outfall edges | street: 20 m, slope 0.0005, 0.5 m drop; pipe: 20 m conduit, 0.3 m drop, v <= 4 m/s | `src/roadFlow.js`, `src/pipeNetwork.js` - stability constants, not physics |
+| Nominal outfall edges | street: 20 m, slope 0.0005, 0.5 m drop; pipe: 20 m conduit, 0.3 m drop, v <= 4 m/s | `src/hydro/roadFlow.js`, `src/hydro/pipeNetwork.js` - stability constants, not physics |
 | Snap distances | pipe ends 3 m; junction ground from a street within 60 m; pump within 80 m | `scripts/build-drainage-model.py` |
 | Rain-grid surface decay | tau = 900 s | `VITE_RAIN_DRAIN_TAU_S` - only weights the catchment layers, not the streets |
 | Storm noise | +/- 15 % | `VITE_RAIN_NOISE` - cosmetic |
-| Harmonic tide fallback | K1 0.55, O1 0.35, M2 0.25, S2 0.10 m, arbitrary phases | `src/hydraulics.js` - synthetic; the Ko Sichang or Laem Chabang gauge's constants would make offline mode honest |
+| Harmonic tide fallback | K1 0.55, O1 0.35, M2 0.25, S2 0.10 m, arbitrary phases | `src/hydro/hydraulics.js` - synthetic; the Ko Sichang or Laem Chabang gauge's constants would make offline mode honest |
 | Wind steering | 0.75 x the 850 hPa wind; 1.5 x the surface wind when no upper wind is served | `VITE_STORM_STEERING_FACTOR`, `VITE_STORM_STEERING_SURFACE_FACTOR` |
 | Ensemble jitter | track +/- 1500 m, speed +/- 30 %, bearing +/- 25°, intensity +/- 30 %, size +/- 20 %; threshold 5 cm | `VITE_ENSEMBLE_*` - guesses; a nowcast verification study would calibrate them |
 | Forecast sampling | Open-Meteo's 8-11 km model sampled at `VITE_FORECAST_GRID` points per side over 3x the area (10 -> 35 km cells) | set 20, or `VITE_FORECAST_AREA_SCALE=2` for the model's own resolution |
-| Rain observations | TMD once-a-day 24 h totals at 5 provincial gauges | `src/weather.js` - TMD's 3-hourly `Weather3Hours`, or the city's own sensors |
+| Rain observations | TMD once-a-day 24 h totals at 5 provincial gauges | `src/layers/rainGauges.js` - TMD's 3-hourly `Weather3Hours`, or the city's own sensors |
 
 **Already textbook, no data needed:** the weir and orifice coefficients
 (1.66 / 0.67), Manning's equation, the section geometry, gravity - `npm test`

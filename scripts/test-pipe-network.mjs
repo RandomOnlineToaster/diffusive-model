@@ -1,4 +1,4 @@
-// Exercises src/pipeNetwork.js on a hand-built three-manhole network:
+// Exercises src/hydro/pipeNetwork.js on a hand-built three-manhole network:
 //
 //   A --50 m Ø0.60--> B --50 m Ø0.60--> C (sea outfall)      P (pump, alone)
 //
@@ -8,7 +8,7 @@
 //
 // Run: node scripts/test-pipe-network.mjs
 
-import { createPipeNetwork, NODE_FREE_OUTFALL, NODE_SEA_OUTFALL } from '../src/pipeNetwork.js';
+import { createPipeNetwork, NODE_FREE_OUTFALL, NODE_SEA_OUTFALL } from '../src/hydro/pipeNetwork.js';
 
 let failures = 0;
 

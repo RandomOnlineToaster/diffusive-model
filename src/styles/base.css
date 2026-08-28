@@ -1,0 +1,400 @@
+:root {
+  --surface: #ffffff;
+  --surface-muted: #f7f8fa;
+  --border: #e6e8ec;
+  --border-strong: #d8dbe0;
+  --text: #14181f;
+  --text-muted: #667085;
+  --accent: #2563eb;
+  /* One spacing value shared by the map inset and the analysis column. */
+  --gutter: 18px;
+
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  color: var(--text);
+  background: var(--surface-muted);
+  line-height: 1.5;
+  font-weight: 400;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  /* The map fills the viewport, so the page itself never scrolls. Only the
+     analysis panel scrolls its own content. */
+  overflow: hidden;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  gap: var(--gutter);
+  height: 100%;
+  padding: var(--gutter);
+}
+
+.map-panel {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+.map-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.analysis-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  background: var(--surface-muted);
+  /* Scrolls, but without the track taking a strip out of a narrow column. */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.analysis-panel::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.panel-header {
+  display: grid;
+  gap: 7px;
+}
+
+.panel-eyebrow {
+  margin: 0 0 2px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.panel-header h1 {
+  margin: 0;
+  font-size: 1.32rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.panel-source {
+  justify-self: start;
+  max-width: 100%;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  /* The DEM source string is long; keep it on one line and reveal the rest
+     through the title attribute rather than wrapping the header. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.stat-tile,
+.result-box,
+.panel-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.stat-tile {
+  padding: 12px 13px;
+}
+
+.stat-tile--wide {
+  grid-column: 1 / -1;
+}
+
+.stat-label {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.stat-value {
+  display: block;
+  margin-top: 5px;
+  font-size: 1.18rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.stat-detail {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.panel-card {
+  padding: 14px;
+}
+
+.panel-card h2 {
+  margin: 0;
+  font-size: 0.94rem;
+  font-weight: 650;
+}
+
+.stack-form {
+  display: grid;
+  gap: 11px;
+  margin-top: 12px;
+}
+
+.field {
+  display: grid;
+  gap: 5px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.field input {
+  padding: 8px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+}
+
+/* Range sliders must not inherit the text-input chrome: the padding and
+   border inset the track, so the thumb could never reach the far ends even at
+   min/max. Stripped back to the native track, min sits hard left and max hard
+   right. */
+.field input[type='range'] {
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.field input[type='range']:focus {
+  box-shadow: none;
+}
+
+.result-box {
+  padding: 12px 13px;
+  background: var(--surface-muted);
+}
+
+.result-subgrid {
+  display: grid;
+  gap: 2px;
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* Volume and litres share a line: the cubic metres stay the headline, the
+   litres keep their smaller muted style rather than competing with it. */
+.result-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.result-liters {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.layer-list {
+  margin: 10px 0 0;
+  padding-left: 17px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.layer-list li + li {
+  margin-top: 4px;
+}
+
+/* --- Leaflet overlays --- */
+
+/* Leaflet gives the scale its own 5px margin while every other control gets
+   10px, so it sat proud of the coordinate readout beneath it. */
+.leaflet-control-scale {
+  margin-left: 10px !important;
+  margin-bottom: 8px !important;
+}
+
+/* Leaflet's scale is a ruler: borders on three sides, open at the top, so the
+   bar reads as a measured length. Restyling it as a rounded capsule to line it
+   up with the coordinate readout threw that away - so keep the ruler and fix
+   the alignment on the container's margin instead, which is what was actually
+   different (5px against the readout's 10px). */
+.leaflet-control-scale {
+  margin-left: 10px !important;
+  margin-bottom: 8px !important;
+}
+
+.leaflet-control-scale-line {
+  padding: 2px 6px 3px;
+  border: 2px solid var(--border-strong);
+  border-top: none;
+  border-radius: 0 0 4px 4px;
+  background: rgba(255, 255, 255, 0.85);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1.25;
+  text-shadow: none;
+}
+
+.mouse-coordinates {
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(20, 24, 31, 0.08);
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+/* The province fill covers the whole map and, being an SVG path, paints above
+   the canvas-rendered layers - so it answered every hover meant for street
+   flow underneath it. Only the outline needs to respond, which keeps the
+   province tooltip while letting the pointer through everywhere else. */
+/* Leaflet sets pointer-events through its own `path.leaflet-interactive`
+   rule, so this selector has to outrank it. */
+.leaflet-pane > svg path.province-outline.leaflet-interactive {
+  pointer-events: stroke;
+}
+
+.contour-label {
+  background: transparent;
+  border: none;
+  pointer-events: none;
+}
+
+.contour-label span {
+  display: inline-block;
+  color: #3f2b1f;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 16px;
+  text-align: center;
+  text-shadow:
+    -1px -1px 0 rgba(255, 255, 255, 0.94),
+    1px -1px 0 rgba(255, 255, 255, 0.94),
+    -1px 1px 0 rgba(255, 255, 255, 0.94),
+    1px 1px 0 rgba(255, 255, 255, 0.94);
+  transform: rotate(var(--angle));
+}
+
+.leaflet-container {
+  font: inherit;
+}
+
+/* Chromium focuses the SVG path you click and draws a ring around its bounding
+   box. The boundary polygon is filled, so clicking anywhere inside the province
+   hits it and the ring becomes a rectangle around the whole province. Keyboard
+   focus still shows a ring via :focus-visible. */
+.leaflet-interactive:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.layer-placeholder {
+  color: #dc2626;
+}
+
+.layer-wip {
+  /* Darker than pure yellow so it stays readable on the white control. */
+  color: #b45309;
+}
+
+.leaflet-control-layers {
+  /* Size to the longest label rather than a guessed fixed width; map.js then
+     equalises the two groups. */
+  width: max-content;
+  max-width: 20rem;
+}
+
+/* Labels stay on one line, so the box width is set by the longest of them. */
+.leaflet-control-layers label span {
+  white-space: nowrap;
+}
+
+.leaflet-control-layers,
+.leaflet-bar {
+  border: 1px solid var(--border) !important;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(20, 24, 31, 0.1);
+}
+
+/* --- Narrow screens: stack, and let the page scroll again --- */
+
+@media (max-width: 900px) {
+  body {
+    overflow: auto;
+  }
+
+  html,
+  body,
+  #app {
+    height: auto;
+  }
+
+  .app-shell {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .map-panel {
+    height: 62vh;
+  }
+
+  .analysis-panel {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 560px) {
+  .stat-grid {
+    grid-template-columns: 1fr;
+  }
+}
+

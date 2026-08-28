@@ -1,0 +1,178 @@
+/* --- Storm rain formula card --- */
+
+.panel-card--formula {
+  display: grid;
+  gap: 9px;
+}
+
+.formula-line {
+  margin: 0;
+  padding: 11px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  font-family: 'Cambria Math', Cambria, Georgia, serif;
+  font-size: 0.95rem;
+}
+
+
+.formula-sub {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.formula-params {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 7px;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.formula-params strong {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--text);
+}
+
+.formula-params strong span {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.formula-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+
+.formula-table th {
+  text-align: left;
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.formula-table th,
+.formula-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.formula-table td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.formula-table tr:last-child td {
+  border-bottom: none;
+}
+
+/* Drainage readouts under the storm readouts: the wind tile carries a longer
+   string ("22 km/h from 224°") than the storm tiles, so it is set smaller and
+   clipped rather than allowed to overflow its tile. */
+.sim-readout--drain {
+  margin-top: 0.35rem;
+}
+
+.sim-readout--drain strong {
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The Outcome bar: the forecast timeline's look, over the storm's next 24 h.
+   Its own head row, since it is a scrub bar rather than a labelled field. */
+.outcome-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.outcome-value {
+  color: var(--text);
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+}
+
+.timeline--outcome {
+  /* Tighter than the forecast bar: it sits between two sliders. */
+  margin: 26px 0 10px;
+}
+
+/* How much of the day has been computed, tinted over the cells. */
+.timeline-computed {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  left: 1px;
+  width: 0;
+  border-radius: 8px 0 0 8px;
+  background: rgba(37, 99, 235, 0.14);
+  pointer-events: none;
+}
+
+.timeline-computed[hidden] {
+  display: none;
+}
+
+/* The hour labels riding a storm's forecast track. Small, unobtrusive, and
+   never in the way of a click: the track is a picture, not a control. */
+.storm-track-label {
+  pointer-events: none;
+  text-align: center;
+  font-size: 0.62rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 14px;
+  color: #1d4ed8;
+}
+
+.storm-track-label span {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 0 0 1px rgba(29, 78, 216, 0.18);
+}
+
+/* The draggable end of a storm's track: drag it to say where the cell
+   should be by the horizon, and its speed and bearing follow. */
+.storm-tip {
+  cursor: grab;
+}
+
+.storm-tip:active {
+  cursor: grabbing;
+}
+
+.storm-tip span {
+  display: block;
+  width: 10px;
+  height: 10px;
+  margin: 2px;
+  box-sizing: border-box;
+  border: 2px solid #1d4ed8;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(20, 24, 31, 0.35);
+}
+
+/* A timeline that something else is driving - the outcome bar while a
+   forecast span holds the grid. */
+.timeline--disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}

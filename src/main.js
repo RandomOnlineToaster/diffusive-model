@@ -1,7 +1,7 @@
-import './style.css';
-import { createAppLayout } from './ui.js';
-import { createRainfallController } from './rainfall.js';
-import { initializeMap } from './map.js';
+import './styles/index.css';
+import { createAppLayout } from './ui/layout.js';
+import { createRainfallController } from './ui/rainfallCalculator.js';
+import { initializeMap } from './app/map.js';
 
 createAppLayout(document.querySelector('#app'));
 

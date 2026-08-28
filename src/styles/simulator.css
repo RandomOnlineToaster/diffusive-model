@@ -1,0 +1,366 @@
+/* --- Rainfall simulator panel --- */
+
+.panel-card--sim {
+  display: grid;
+  gap: 10px;
+}
+
+/* The line between the card's two halves: placed storms above, the forecast
+   below. Both are driven by the same clock and the same controls, which is
+   why they share a card rather than sitting in two. */
+.panel-divider {
+  width: 100%;
+  margin: 3px 0 1px;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.sim-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sim-clock-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.sim-clock-wrap small {
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.sim-clock {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.84rem;
+  font-weight: 650;
+  color: var(--text-muted);
+}
+
+.sim-controls {
+  display: flex;
+  gap: 6px;
+}
+
+.sim-button {
+  flex: 1;
+  padding: 7px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sim-button:hover {
+  background: var(--surface-muted);
+}
+
+.sim-button--primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.sim-button--primary:hover {
+  filter: brightness(1.08);
+  background: var(--accent);
+}
+
+.sim-button--active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+}
+
+.sim-button--danger {
+  flex: 0 0 auto;
+  border-color: #fecaca;
+  color: #dc2626;
+}
+
+
+.field--inline {
+  grid-template-columns: 5.6rem 1fr 4.2rem;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.76rem;
+}
+
+.field--inline output {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text);
+}
+
+.field--inline input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+/* --- storm editor cards --- */
+
+/* Spacing is margin rather than grid gap, so a card being removed can
+   animate its own spacing away along with its height. */
+.storm-cards {
+  display: block;
+}
+
+/* display: block beats the hidden attribute, so spell it out: no storms,
+   no card stack. */
+.storm-cards[hidden] {
+  display: none;
+}
+
+.storm-card {
+  margin-top: 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  animation: storm-card-in 180ms ease;
+}
+
+.storm-card:first-child {
+  margin-top: 0;
+}
+
+/* The selected storm is the one the map handles and the formula card follow;
+   a plain border shift is enough to say so. */
+.storm-card--selected {
+  border-color: var(--border-strong);
+  background: var(--surface);
+}
+
+.storm-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.storm-card-summary {
+  margin-left: auto;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+/* Chevron points down when open, right when collapsed. */
+.storm-card-chevron {
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  transform: rotate(45deg) translate(-2px, -2px);
+  transition: transform 0.18s ease;
+}
+
+.storm-card--collapsed .storm-card-chevron {
+  transform: rotate(-45deg) translate(-1px, 1px);
+}
+
+/* Collapsing animates the row from its natural height to nothing: a plain
+   display toggle would snap. The inner element clips so the padding folds
+   away with the content. */
+.storm-card-fold {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.18s ease;
+}
+
+.storm-card--collapsed .storm-card-fold {
+  grid-template-rows: 0fr;
+}
+
+.storm-card-body {
+  display: grid;
+  gap: 7px;
+  min-height: 0;
+  padding: 0 10px 10px;
+  overflow: hidden;
+  transition: padding-bottom 0.18s ease;
+}
+
+/* Padding sits outside the animated row, so it has to fold away too or the
+   collapsed card keeps a 10px lip. */
+.storm-card--collapsed .storm-card-body {
+  padding-bottom: 0;
+}
+
+.storm-card-remove {
+  justify-self: end;
+  flex: 0 0 auto;
+  margin-top: 2px;
+  padding: 5px 10px;
+  font-size: 0.74rem;
+}
+
+/* Added and removed cards slide rather than pop. Removal needs a measured
+   start height, which rainfallSim.js sets before adding the class. */
+@keyframes storm-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.storm-card--leaving {
+  overflow: hidden;
+  opacity: 0;
+  margin-top: 0;
+  pointer-events: none;
+  transition:
+    height 0.18s ease,
+    opacity 0.18s ease,
+    margin-top 0.18s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .storm-card,
+  .storm-card-fold,
+  .storm-card-body,
+  .storm-card-chevron,
+  .storm-card--leaving {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* Shown only when it explains something: a storm raining outside the mapped
+   street network, where "Water on map" can only ever read zero. */
+.sim-note {
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.sim-note[hidden] {
+  display: none;
+}
+
+.sim-readout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.sim-readout div {
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.sim-readout span {
+  display: block;
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.sim-readout strong {
+  font-size: 0.92rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Spread the stops across the full panel width rather than bunching them
+   at the left. */
+.sim-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.66rem;
+  color: var(--text-muted);
+}
+
+/* Only the colour stops share the width evenly; the unit sits alongside,
+   otherwise "mm/h" is spaced as though it were another stop. */
+.sim-legend-stops {
+  display: flex;
+  flex: 1;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.sim-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.sim-legend-item i {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+}
+
+.sim-probe {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  min-height: 1.2em;
+}
+
+/* Storm handles on the map */
+
+.storm-centre,
+.storm-grip {
+  background: transparent;
+  border: none;
+}
+
+.storm-centre span {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border: 3px solid #ffffff;
+  border-radius: 50%;
+  background: #2563eb;
+  box-shadow: 0 1px 4px rgba(20, 24, 31, 0.4);
+  cursor: move;
+}
+
+.storm-centre--selected span {
+  background: #dc2626;
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.25);
+}
+
+.storm-grip span {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #2563eb;
+  border-radius: 2px;
+  background: #ffffff;
+  cursor: ew-resize;
+}
+
+.rainfall-field {
+  pointer-events: none;
+}
+
+/* Flow Direction particles: one canvas over the map, never in the way of a
+   click. */
+.flow-particles {
+  pointer-events: none;
+}
+
