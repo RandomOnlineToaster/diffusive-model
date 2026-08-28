@@ -81,12 +81,21 @@ export function createForecastRainDriver({ rainfall, playHoursPerSecond, refresh
   };
 
   /**
-   * Which forecast cell each rain-grid cell reads. Nearest cell, not
-   * interpolated: the figure is the forecast for that patch of ground, and
-   * the heatmap's smoothing is for the eye. -1 where the forecast has no cell.
+   * How each rain-grid cell reads the forecast: the four forecast cells
+   * around it and the bilinear weights between them, so the coarse lattice
+   * lands on the ground as a continuous field. A forecast cell is one figure
+   * for 10-35 km of country; reading the nearest cell drew a cliff along
+   * every cell edge - one side of a street raining, the other dry - which is
+   * the sampling, not the weather. Interpolating between cell centres is
+   * what the heatmap already does for the eye.
+   *
+   * Cells the lattice lacks (a thinned grid, its outer edge) drop out and the
+   * remaining weights are renormalised; a rain-grid cell with no forecast
+   * cell around it at all reads 0.
    */
   function mapCells(lattice, forecastGrid) {
-    const cellMap = new Int32Array(cellCount);
+    const corner = new Int32Array(cellCount * 4).fill(-1);
+    const weight = new Float32Array(cellCount * 4);
     const { bounds } = grid;
     const latStep = (bounds.north - bounds.south) / grid.rows;
     const lngStep = (bounds.east - bounds.west) / grid.columns;
@@ -96,26 +105,42 @@ export function createForecastRainDriver({ rainfall, playHoursPerSecond, refresh
     for (let row = 0; row < grid.rows; row += 1) {
       // Row 0 is the north edge, matching the grid's own layout.
       const lat = bounds.north - (row + 0.5) * latStep;
-      const latticeRow = Math.round((lat - lat0) / forecastGrid.cellLat);
-      const rowInside = latticeRow >= 0 && latticeRow < lattice.rows;
+      const fy = (lat - lat0) / forecastGrid.cellLat;
+      const r0 = Math.floor(fy);
+      const ty = fy - r0;
 
       for (let column = 0; column < grid.columns; column += 1) {
-        let index = -1;
-        if (rowInside) {
-          const lng = bounds.west + (column + 0.5) * lngStep;
-          const latticeColumn = Math.round((lng - lng0) / forecastGrid.cellLng);
-          if (latticeColumn >= 0 && latticeColumn < lattice.columns) {
-            const k = latticeRow * lattice.columns + latticeColumn;
-            if (lattice.cells[k]) {
-              index = k;
-            }
+        const lng = bounds.west + (column + 0.5) * lngStep;
+        const fx = (lng - lng0) / forecastGrid.cellLng;
+        const c0 = Math.floor(fx);
+        const tx = fx - c0;
+        const at = (row * grid.columns + column) * 4;
+
+        let sum = 0;
+        for (let j = 0; j < 4; j += 1) {
+          const r = r0 + (j >> 1);
+          const c = c0 + (j & 1);
+          const w = (j & 1 ? tx : 1 - tx) * (j >> 1 ? ty : 1 - ty);
+          if (w <= 0 || r < 0 || c < 0 || r >= lattice.rows || c >= lattice.columns) {
+            continue;
+          }
+          const k = r * lattice.columns + c;
+          if (!lattice.cells[k]) {
+            continue;
+          }
+          corner[at + j] = k;
+          weight[at + j] = w;
+          sum += w;
+        }
+        if (sum > 0 && sum < 1) {
+          for (let j = 0; j < 4; j += 1) {
+            weight[at + j] /= sum;
           }
         }
-        cellMap[row * grid.columns + column] = index;
       }
     }
 
-    return cellMap;
+    return { corner, weight };
   }
 
   // Hour buckets: bucket i runs from stamp i to stamp i + 1, at the rain
@@ -152,9 +177,17 @@ export function createForecastRainDriver({ rainfall, playHoursPerSecond, refresh
       }
     }
 
+    const { corner, weight } = cellMap;
     for (let index = 0; index < cellCount; index += 1) {
-      const k = cellMap[index];
-      base[index] = k >= 0 ? rates[k] : 0;
+      const at = index * 4;
+      let value = 0;
+      for (let j = 0; j < 4; j += 1) {
+        const k = corner[at + j];
+        if (k >= 0) {
+          value += weight[at + j] * rates[k];
+        }
+      }
+      base[index] = value;
     }
 
     session.bucket = bucket;

@@ -9,7 +9,7 @@
 import L from 'leaflet';
 import { createStormSystem, STORM_DEFAULTS } from './storm.js';
 import { createRainfallGrid, RAINFALL_LEGEND } from './rainfallGrid.js';
-import { createRainfallField, createStormHandles } from './rainfallLayer.js';
+import { createRainfallField, createStormHandles, createStormTrackLayer } from './rainfallLayer.js';
 import { config } from './config.js';
 
 // The loop ticks at a fixed real-time rate and advances the simulation by
@@ -29,7 +29,15 @@ export function createRainfallSimulator({
   streetCoverage,
   // () => { east, north } m/s for a newly placed storm, or null: the
   // steering wind, so a cell drifts the way the weather says it would.
-  defaultVelocity = null
+  defaultVelocity = null,
+  // Called whenever a storm is placed, edited or removed in storm mode: the
+  // scenario has changed, so anything precomputed from it is stale.
+  onStormsChanged = null,
+  // Called when Play is pressed to START the clock, before it starts.
+  // Returning false calls the press off. This is where an hour picked on
+  // the outcome bar is run to: choosing a moment and starting are two
+  // decisions, and Play is the one that means "go".
+  onPlayRequest = null
 }) {
   const grid = createRainfallGrid({
     bounds,
@@ -50,7 +58,26 @@ export function createRainfallSimulator({
     onSelect: (id) => selectStorm(id)
   });
 
-  const layer = L.layerGroup([field, handles.layer]);
+  // Tracks under the handles, so a storm's own rings and grips stay on top
+  // of the ghosts of where it is going.
+  const track = createStormTrackLayer({
+    grid,
+    stormSystem,
+    // Dragging a track's tip aims the storm: same effect as moving its speed
+    // and bearing sliders, so it goes through the same path.
+    onChange: () => {
+      refreshStormCards();
+      previewField();
+    }
+  });
+  const layer = L.layerGroup([field, track.layer, handles.layer]);
+
+  // Every place the handles are redrawn, the tracks are too: they are the
+  // same picture of the same storms.
+  function refreshHandles() {
+    handles.refresh();
+    track.update();
+  }
 
   const dom = {
     clock: document.querySelector('#sim-clock'),
@@ -99,6 +126,9 @@ export function createRainfallSimulator({
   let running = false;
   let placing = false;
   let frameHandle = null;
+  // Set while something else is driving the models (the outcome timeline's
+  // precompute): Play is refused until it is done.
+  let locked = false;
   // The storm clock counts from zero; the tide and the wind run on real
   // time. A scenario starts "now", so sim time t is this moment plus t.
   let scenarioStartMs = Date.now();
@@ -223,7 +253,7 @@ export function createRainfallSimulator({
 
         refreshStormCards();
         updateFormulaCard();
-        handles.refresh();
+        refreshHandles();
         previewField();
       });
     }
@@ -319,7 +349,7 @@ export function createRainfallSimulator({
       selectedId = next ? next.id : null;
     }
 
-    handles.refresh();
+    refreshHandles();
     handles.setSelected(selectedId);
     refreshStormCards();
     previewField();
@@ -373,6 +403,7 @@ export function createRainfallSimulator({
 
     grid.step(stormSystem, 0, { noiseAmplitude: 0 });
     render();
+    onStormsChanged?.();
   }
 
   function formatClock(seconds) {
@@ -400,7 +431,7 @@ export function createRainfallSimulator({
     // Under a forecast span the map already carries the forecast's own
     // heatmap, so the simulator paints only what it adds to it: the storms.
     field.update(externalRain ? grid.stormIntensity : grid.intensity, 1);
-    handles.refresh();
+    refreshHandles();
     if (externalRain) {
       dom.play.textContent = externalRain.playing ? 'Pause' : 'Play';
       dom.play.classList.toggle('sim-button--active', Boolean(externalRain.playing));
@@ -436,6 +467,30 @@ export function createRainfallSimulator({
    * alone called that "covered" while the readout still sat at zero.
    */
   function updateCoverageNote() {
+    // A cell dragged out past the rain grid rains on nothing at all: the
+    // grid is the model, and a storm outside it reads 0 mm/h however hard
+    // its sliders say it is raining. Worth saying outright, since the map
+    // goes on well past the edge of what is simulated.
+    const outside = stormSystem.storms.filter((storm) => {
+      const { lat, lng } = grid.toLatLng(storm.x, storm.y);
+      return grid.indexAt(lat, lng) < 0;
+    });
+    if (outside.length > 0) {
+      dom.coverageNote.hidden = false;
+      const one = outside.length === 1;
+      const which = one
+        ? stormSystem.storms.length === 1
+          ? 'This storm sits'
+          : 'One storm sits'
+        : outside.length === stormSystem.storms.length
+          ? 'Every storm sits'
+          : `${outside.length} of ${stormSystem.storms.length} storms sit`;
+      dom.coverageNote.textContent =
+        `${which} outside the simulated area, so nothing ${one ? 'it drops' : 'they drop'} is ` +
+        'modelled. Drag the centre back inside the study box to simulate it.';
+      return;
+    }
+
     const rained = grid.totals().totalVolumeM3;
     const onStreets = getWaterOnMapM3?.() ?? 0;
 
@@ -508,7 +563,7 @@ export function createRainfallSimulator({
       storm.velocityNorthMs = drift.north;
     }
 
-    handles.refresh();
+    refreshHandles();
     selectStorm(storm.id);
     // Under a forecast span this hands the storm to the span, which re-rains
     // it from here; otherwise it previews on the paused grid as before.
@@ -518,18 +573,31 @@ export function createRainfallSimulator({
 
   // --- events ---------------------------------------------------------------
 
-  dom.play.addEventListener('click', () => {
+  dom.play.addEventListener('click', async () => {
+    if (locked) {
+      return;
+    }
     // With a forecast span holding the grid, Play runs or pauses the span.
     if (externalRain) {
       externalRain.togglePlay();
       return;
     }
+    // Pausing is immediate and unconditional.
+    if (running) {
+      setRunning(false);
+      return;
+    }
+
+    if (onPlayRequest && (await onPlayRequest()) === false) {
+      return;
+    }
+
     // Playing without a storm is allowed while water is still draining;
     // only a completely dry, stormless grid has nothing to simulate.
     if (stormSystem.storms.length === 0 && grid.totals().wetCells === 0) {
       return;
     }
-    setRunning(!running);
+    setRunning(true);
   });
 
   dom.add.addEventListener('click', () => setPlacing(!placing));
@@ -553,7 +621,7 @@ export function createRainfallSimulator({
     grid.reset();
     scenarioStartMs = Date.now();
     selectedId = null;
-    handles.refresh();
+    refreshHandles();
     refreshStormCards();
     // Before render(), not after: the panel reads the street water through
     // getWaterOnMapM3(), so painting first showed the volume that this very
@@ -633,6 +701,9 @@ export function createRainfallSimulator({
     layer,
     grid,
     stormSystem,
+    // Where the storms have been and are going; the outcome bar points its
+    // horizon at the hour being scrubbed to.
+    stormTrack: track,
     addStormAt,
 
     /** True while a storm is being placed, or was placed by this click. */
@@ -679,6 +750,25 @@ export function createRainfallSimulator({
     },
 
     stop: () => setRunning(false),
+
+    get running() {
+      return running;
+    },
+
+    /** Refuse Play (and grey the button) while another driver owns the models. */
+    setLocked(flag) {
+      locked = Boolean(flag);
+      if (locked) {
+        setRunning(false);
+      }
+      dom.play.disabled = locked;
+    },
+
+    /** Repaint the storm handles and cards after storms were moved directly. */
+    refreshStorms() {
+      refreshHandles();
+      refreshStormCards();
+    },
 
     /**
      * Advance the storm clock by dt seconds outside the play loop - what one

@@ -40,6 +40,28 @@ export function createAppLayout(root) {
             <output id="sim-detail-value">100%</output>
           </label>
 
+          <!-- The outcome of the placed storms at any hour of the day,
+               without playing the day through. A scrub bar rather than a
+               slider: the hours are marked, the tint shows how much has been
+               computed, and the capsule reads the exact time. Wired in
+               map.js through outcomeBar.js; the first drag computes the
+               scenario once, then it is instant, and Play carries on from
+               the hour shown. -->
+          <div class="outcome-head">
+            <span>Outcome at</span>
+            <span class="outcome-value" id="sim-outcome-value">live</span>
+          </div>
+          <div class="timeline timeline--outcome" id="sim-outcome"
+            title="Pick an hour of the placed storms; the tracks ghost where the cells will be. Play runs the scenario to that hour and stops there; Play again runs on.">
+            <i class="timeline-computed" id="sim-outcome-computed" hidden></i>
+            <div class="timeline-track" id="sim-outcome-track" tabindex="0"
+              role="slider" aria-label="Outcome at, hours into the storm"></div>
+            <div class="timeline-head">
+              <span class="timeline-head-label" id="sim-outcome-label">+0:00</span>
+            </div>
+          </div>
+          <p class="sim-note" id="sim-outcome-status" hidden></p>
+
           <!-- One editor card per storm, stacked; several can stay open at
                once so two storms can be tuned side by side. Built by
                rainfallSim.js as storms are added and removed. -->
@@ -179,9 +201,9 @@ export function createAppLayout(root) {
             <li>Sensors: in-pipe (tunnel) and pole-mounted road stations</li>
             <li>Flow direction: D8 routing on the analysis grid</li>
             <li>Catchment (flow accumulation): upstream area draining through each grid cell, where flow converges</li>
-            <li>Ponding: standing water per street junction, painted over the ground it has spread to</li>
+            <li>Ponding: standing water painted as bands along the wet streets, as wide as the ground it has spread to</li>
             <li>Street flow: runoff routed along the OSM street network (30 m DEM heights); while it rains the chains follow the live flow, with Horton infiltration and inlets into the drains</li>
-            <li>Rainfall: Gaussian storm cells on a grid, placed and moved on the map; an ensemble of jittered replays gives a flood chance per street</li>
+            <li>Rainfall: Gaussian storm cells on a grid, placed and moved on the map; the Outcome bar scrubs the next 24 h, and an ensemble of jittered replays gives a flood chance per street</li>
           </ul>
         </section>
       </aside>

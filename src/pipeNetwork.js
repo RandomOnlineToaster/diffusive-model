@@ -24,7 +24,14 @@
 // same scheme as the street model, so the two conserve mass between them.
 
 import { config } from './config.js';
-import { equalisingVolume, manningFlow, pumpDischarge, sectionOf } from './hydraulics.js';
+import {
+  createSection,
+  equalisingVolume,
+  manningFlow,
+  pumpDischarge,
+  sectionInto,
+  sectionOf
+} from './hydraulics.js';
 
 const MODEL_URL = '/data/drainage-model.json';
 
@@ -135,6 +142,40 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
     fullVolume[n] = lowVolume[n] + shaftM2[n] * (lidDepth - crownDepth[n]);
   }
 
+  // Which junctions are worth stepping: those holding water, the ones a
+  // conduit could push water into, and every outfall (the sea can push water
+  // IN through those). Most of the network is dry most of the time, and the
+  // step is four passes over every junction and conduit per substep, up to
+  // 30 substeps - so walking only the wet part is the difference between a
+  // simulated day in half a minute and in a few seconds.
+  const nodeAdjOffset = new Int32Array(nodeCount + 1);
+  const nodeAdjConduit = new Int32Array(conduitCount * 2);
+  const nodeAdjNode = new Int32Array(conduitCount * 2);
+  {
+    for (let c = 0; c < conduitCount; c += 1) {
+      nodeAdjOffset[from[c] + 1] += 1;
+      nodeAdjOffset[to[c] + 1] += 1;
+    }
+    for (let n = 0; n < nodeCount; n += 1) {
+      nodeAdjOffset[n + 1] += nodeAdjOffset[n];
+    }
+    const cursor = nodeAdjOffset.slice(0, nodeCount);
+    for (let c = 0; c < conduitCount; c += 1) {
+      const a = from[c];
+      const b = to[c];
+      nodeAdjConduit[cursor[a]] = c;
+      nodeAdjNode[cursor[a]] = b;
+      cursor[a] += 1;
+      nodeAdjConduit[cursor[b]] = c;
+      nodeAdjNode[cursor[b]] = a;
+      cursor[b] += 1;
+    }
+  }
+
+  // One section record, rewritten per conduit: the step evaluates tens of
+  // thousands of them and a fresh object each time is pure garbage.
+  const section = createSection();
+
   const volM3 = new Float64Array(nodeCount);
   const head = new Float64Array(nodeCount); // water level, metres MSL
   const planArea = new Float64Array(nodeCount); // tank area at the current stage
@@ -167,6 +208,70 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
     for (let n = 0; n < nodeCount; n += 1) {
       head[n] = headOf(n);
       planArea[n] = volM3[n] <= lowVolume[n] ? lowArea[n] : shaftM2[n];
+    }
+  }
+
+  // --- the active set ---------------------------------------------------
+  const nodeActive = new Uint8Array(nodeCount);
+  const wetSeen = new Uint8Array(nodeCount);
+  const activeNodes = new Int32Array(nodeCount);
+  const activeConduits = new Int32Array(Math.max(1, conduitCount));
+  const conduitActive = new Uint8Array(Math.max(1, conduitCount));
+  let activeCount = 0;
+  let activeConduitCount = 0;
+
+  function clearActive() {
+    for (let i = 0; i < activeCount; i += 1) {
+      const n = activeNodes[i];
+      nodeActive[n] = 0;
+      wetSeen[n] = 0;
+    }
+    for (let i = 0; i < activeConduitCount; i += 1) {
+      conduitActive[activeConduits[i]] = 0;
+    }
+    activeCount = 0;
+    activeConduitCount = 0;
+  }
+
+  function addNode(n) {
+    if (nodeActive[n] === 0) {
+      nodeActive[n] = 1;
+      activeNodes[activeCount] = n;
+      activeCount += 1;
+    }
+  }
+
+  /** A junction with water (or an open outfall): its conduits matter. */
+  function activate(n) {
+    if (wetSeen[n] === 1) {
+      return;
+    }
+    wetSeen[n] = 1;
+    addNode(n);
+    for (let k = nodeAdjOffset[n]; k < nodeAdjOffset[n + 1]; k += 1) {
+      const c = nodeAdjConduit[k];
+      if (conduitActive[c] === 0) {
+        conduitActive[c] = 1;
+        activeConduits[activeConduitCount] = c;
+        activeConduitCount += 1;
+      }
+      addNode(nodeAdjNode[k]);
+    }
+  }
+
+  /** Rebuild the active set from the water standing in the network now. */
+  function collectActive() {
+    clearActive();
+    for (let n = 0; n < nodeCount; n += 1) {
+      if (volM3[n] > 0) {
+        activate(n);
+      } else if (kind[n] === NODE_SEA_OUTFALL && seaLevelM > invert[n]) {
+        // A drowned outfall lets the sea in even with nothing in the pipe.
+        activate(n);
+      } else if (isPump[n] === 1 && pumpRunning[n] === 1) {
+        // A pump left running has to be told its sump is empty.
+        activate(n);
+      }
     }
   }
 
@@ -218,6 +323,7 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
     },
 
     reset() {
+      clearActive();
       volM3.fill(0);
       conduitRate.fill(0);
       boundaryFlow.fill(0);
@@ -228,6 +334,26 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
       pumpedM3 = 0;
       spilledM3 = 0;
       spilledLostM3 = 0;
+      refreshHeads();
+    },
+
+    /** The state as a snapshot (volumes, pump states, counters), ~30 KB. */
+    snapshot() {
+      return {
+        vol: Float32Array.from(volM3),
+        pumps: Uint8Array.from(pumpRunning),
+        totals: { inflowM3, dischargedM3, backflowM3, pumpedM3, spilledM3, spilledLostM3 }
+      };
+    },
+
+    /** Put a snapshot back as the live state; flow rates read as zero. */
+    restore(snap) {
+      clearActive();
+      volM3.set(snap.vol);
+      pumpRunning.set(snap.pumps);
+      ({ inflowM3, dischargedM3, backflowM3, pumpedM3, spilledM3, spilledLostM3 } = snap.totals);
+      conduitRate.fill(0);
+      boundaryFlow.fill(0);
       refreshHeads();
     },
 
@@ -280,18 +406,34 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
       conduitRate.fill(0);
       boundaryFlow.fill(0);
 
+      // Only the wet part of the network is stepped; everything below reads
+      // and writes the active set alone.
+      collectActive();
+      if (activeCount === 0) {
+        return;
+      }
+
       for (let pass = 0; pass < substeps; pass += 1) {
-        refreshHeads();
-        proposedOut.fill(0);
-        boundaryOut.fill(0);
-        conduitFlow.fill(0);
-        delta.fill(0);
+        const stepped = activeCount;
+        for (let i = 0; i < stepped; i += 1) {
+          const n = activeNodes[i];
+          head[n] = headOf(n);
+          planArea[n] = volM3[n] <= lowVolume[n] ? lowArea[n] : shaftM2[n];
+          proposedOut[n] = 0;
+          boundaryOut[n] = 0;
+          delta[n] = 0;
+        }
+        const steppedConduits = activeConduitCount;
+        for (let i = 0; i < steppedConduits; i += 1) {
+          conduitFlow[activeConduits[i]] = 0;
+        }
 
         // Phase 1: propose a transfer through every conduit from the frozen
         // heads. The higher end sends; the depth of flow is the water above
         // the invert at that end, capped at the pipe height (a surcharged
         // pipe runs full, and the extra head only steepens the slope).
-        for (let c = 0; c < conduitCount; c += 1) {
+        for (let i = 0; i < steppedConduits; i += 1) {
+          const c = activeConduits[i];
           const a = from[c];
           const b = to[c];
           let dh = head[a] - head[b];
@@ -315,7 +457,7 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
           if (depth < 1e-3) {
             continue;
           }
-          const section = sectionOf(shape[c], widthM[c], heightM[c], depth);
+          sectionInto(section, shape[c], widthM[c], heightM[c], depth);
           let flow = manningFlow(section.area, section.hydraulicRadius, dh / lengthM[c], manningN[c]);
           if (flow > vMax * section.area) {
             flow = vMax * section.area;
@@ -339,7 +481,8 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
         // Outfalls: a nominal conduit, the size of the biggest one arriving,
         // to the receiving water. Sea outfalls face the tide and flow either
         // way; free outfalls always find a lower level.
-        for (let n = 0; n < nodeCount; n += 1) {
+        for (let i = 0; i < stepped; i += 1) {
+          const n = activeNodes[i];
           const k = kind[n];
           if (k !== NODE_SEA_OUTFALL && k !== NODE_FREE_OUTFALL) {
             continue;
@@ -358,7 +501,7 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
             if (depth < 1e-3) {
               continue;
             }
-            const section = sectionOf(shape[c], widthM[c], heightM[c], depth);
+            sectionInto(section, shape[c], widthM[c], heightM[c], depth);
             let flow = manningFlow(section.area, section.hydraulicRadius, dh / BOUNDARY_LEN_M, manningN[c]);
             if (flow > vMax * section.area) {
               flow = vMax * section.area;
@@ -373,7 +516,7 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
             if (depth < 1e-3) {
               continue;
             }
-            const section = sectionOf(shape[c], widthM[c], heightM[c], depth);
+            sectionInto(section, shape[c], widthM[c], heightM[c], depth);
             let flow = manningFlow(section.area, section.hydraulicRadius, -dh / BOUNDARY_LEN_M, manningN[c]);
             if (flow > vMax * section.area) {
               flow = vMax * section.area;
@@ -390,13 +533,15 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
         }
 
         // Phase 2: a junction may not send more than it holds.
-        for (let n = 0; n < nodeCount; n += 1) {
+        for (let i = 0; i < stepped; i += 1) {
+          const n = activeNodes[i];
           const proposed = proposedOut[n];
           outflowScale[n] = proposed > volM3[n] && proposed > 0 ? volM3[n] / proposed : 1;
         }
 
         // Phase 3: land every transfer together.
-        for (let c = 0; c < conduitCount; c += 1) {
+        for (let i = 0; i < steppedConduits; i += 1) {
+          const c = activeConduits[i];
           const flow = conduitFlow[c];
           if (flow === 0) {
             continue;
@@ -408,7 +553,8 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
           delta[dst] += moved;
           conduitRate[c] += flow > 0 ? moved : -moved;
         }
-        for (let n = 0; n < nodeCount; n += 1) {
+        for (let i = 0; i < stepped; i += 1) {
+          const n = activeNodes[i];
           const out = boundaryOut[n];
           if (out > 0) {
             const moved = out * outflowScale[n];
@@ -419,23 +565,22 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
         }
 
         // Phase 4: apply; pump; spill whatever stands above the lid.
-        for (let n = 0; n < nodeCount; n += 1) {
+        for (let i = 0; i < stepped; i += 1) {
+          const n = activeNodes[i];
           let next = volM3[n] + delta[n];
           if (next < 0) {
             next = 0;
           }
 
           if (isPump[n] === 1) {
-            const pump = pumpDischarge({
-              depthM: next / lowArea[n],
-              startDepthM: config.pumpStartDepthM,
-              stopDepthM: config.pumpStopDepthM,
-              ratedM3s: config.pumpRatedM3s,
-              running: pumpRunning[n] === 1
-            });
-            pumpRunning[n] = pump.running ? 1 : 0;
-            if (pump.rateM3s > 0) {
-              const lifted = Math.min(next, pump.rateM3s * dtSub);
+            // pumpDischarge's rule, inlined: it is called per pump per
+            // substep and its result object is otherwise garbage.
+            const depth = next / lowArea[n];
+            const running =
+              pumpRunning[n] === 1 ? depth > config.pumpStopDepthM : depth >= config.pumpStartDepthM;
+            pumpRunning[n] = running ? 1 : 0;
+            if (running && config.pumpRatedM3s > 0) {
+              const lifted = Math.min(next, config.pumpRatedM3s * dtSub);
               next -= lifted;
               pumpedM3 += lifted;
             }
@@ -453,12 +598,20 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
           }
 
           volM3[n] = next;
+          // Newly wet: bring its conduits into the next substep.
+          if (next > 0) {
+            activate(n);
+          }
         }
       }
 
-      refreshHeads();
-      for (let c = 0; c < conduitCount; c += 1) {
-        conduitRate[c] /= dtSeconds;
+      for (let i = 0; i < activeCount; i += 1) {
+        const n = activeNodes[i];
+        head[n] = headOf(n);
+        planArea[n] = volM3[n] <= lowVolume[n] ? lowArea[n] : shaftM2[n];
+      }
+      for (let i = 0; i < activeConduitCount; i += 1) {
+        conduitRate[activeConduits[i]] /= dtSeconds;
       }
     },
 

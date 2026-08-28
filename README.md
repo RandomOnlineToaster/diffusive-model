@@ -112,6 +112,50 @@ show their values, and pipes and covers open a survey card when clicked.
 3. Press **Play**. **Speed** is simulated seconds per real second (10x by
    default: a minute of storm every six seconds). **Reset** clears the storms
    and every drop of water.
+4. Or skip the waiting: the **Outcome at** bar under *Flow detail* picks an
+   hour of the storm's next 24. Drag it (or focus it and use the arrow keys -
+   half an hour a press, an hour with Shift; Home and End for either end);
+   the capsule reads the time, `+6:30`, the cells mark every third hour, and
+   the storm tracks on the map stretch to that hour, ghosting where the
+   cells will have got to. Letting go only *picks* the hour - the caption
+   reads `6 h · press Play`, and nothing has run yet.
+
+   **Play** goes there: it runs the scenario as far as that hour and no
+   further (about two seconds for five, in 5-minute steps, with the bar
+   tinting to show how much has been run), shows the storms, rain field,
+   streets, pools and drains as they stand then, and **stops**. The ghosts
+   come off - the water they predicted is now on the map - and the bar stays
+   parked on that hour rather than chasing the clock; the sim time in the
+   header is what counts on. Press Play again to run on from there. Asking
+   for a later hour continues from where it got to rather than starting
+   again, and an hour already run is instant. Any change to a storm, or
+   Reset, throws the run away. While a forecast span is playing the bar is
+   greyed out - the span drives the same clock.
+
+A moving storm draws its **track**: a solid line back to where it was
+placed and a dashed one ahead with an arrow, so where it came from and where
+it is heading are always on the map - and when a fast cell has drifted clean
+off it, the track is what says where it went. **Drag the ring on the end of
+the track to aim the storm**: where you drop it is where the cell will be at
+the horizon, which sets its speed and bearing together (the sliders read the
+result back).
+
+While an hour is being picked on the Outcome bar the track also **ghosts**
+the cell at three times along the way, each labelled `+1:20` and drawn as
+rings at one and two sigma inside the rain edge, so the ghost carries the
+shape of the rain and not just its extent - which is the only way to see it
+at all once the cell is beyond the rain grid, where the field cannot be
+painted. The ghosts come off once that hour is on the map.
+
+A parked storm has no track. Tracks are clipped to the study area, so a cell
+that has drifted a thousand kilometres away during a forecast span costs
+nothing to draw.
+
+The rain field is painted on a canvas the size of the rain grid, so a cell
+dragged out past the study area would otherwise read as a flat disc. Out
+there it draws the same sigma rings instead, and the panel says plainly that
+nothing it drops is being modelled - the grid *is* the model, and a storm
+outside it rains 0 mm/h however hard its sliders are set.
 
 The readouts show the peak rain rate now, the wettest cell's depth this
 step, the total rain that has fallen and the water standing on the streets
@@ -126,7 +170,7 @@ runs.
 | Layer | Shows | Notes |
 | --- | --- | --- |
 | **Street Flow** | While it rains: every wet street coloured by standing depth (green 0.5 cm → red 50 cm), with particle trails running the way the water is actually moving. Without rain: the terrain's steepest-descent routes | Hover a street for its depth and flow. **Flow detail** trades chains for speed |
-| **Ponding** | The standing water itself: a blue sheet over the ground each wet junction has spread to, darker the deeper | Sits under the other layers. Needs real depth - a light shower drains before it ponds; the default 100 mm/h cell over central Pattaya floods within a few minutes |
+| **Ponding** | The standing water itself: a blue band along each wet street, as wide as the ground the water has spread to (the street below the kerb, the 60 m catchment strip above it), darker the deeper - so a flooded block reads as a flooded block | Sits under the other layers. Needs real depth - a light shower drains before it ponds; the default 100 mm/h cell over central Pattaya floods within a few minutes |
 | **Flow Direction / Flow Paths** | The 200 m grid's D8 field and channel tree; under rain the tree is lit where rain has recently fallen | Catchment scale, not street scale |
 | **Catchment (flow accumulation)** | Upstream area draining through each grid cell - where flow converges | Not where water stands: that is Ponding |
 | **Drainage Pipes** | The surveyed drain runs, coloured by type and weighted by bore; while it rains, recoloured by how full each run is (blue → red) | Click a run for size, material, length |
@@ -375,8 +419,11 @@ This field only weights the grid flow layers (Flow Paths / Accumulation) and
 forecast Street Flow; the street ponding model takes the rain rate directly.
 
 **Forecast rain** (`src/forecastRain.js`). Each forecast cell's "mm between T
-and T + 1 h" becomes a steady rate `mm / hours` over that hour, mapped onto the
-rain grid by nearest cell. A moving storm laid over it is advanced in slices
+and T + 1 h" becomes a steady rate `mm / hours` over that hour, laid onto the
+rain grid by **bilinear interpolation** between the four forecast cells around
+each rain-grid cell (a forecast cell is one figure for 10-35 km of country;
+reading the nearest cell drew a cliff along every cell edge). Cells the
+lattice lacks drop out and the remaining weights are renormalised. A moving storm laid over it is advanced in slices
 no longer than half its rain radius at its speed (at most 600 slices per span),
 placed at the middle of each slice so its track is even. Scrubbing backwards
 re-rains the span from its start, so what is on screen is a pure function of
@@ -484,7 +531,26 @@ every junction's peak depth; the painted value is
 
 on fixed stops of 5, 20, 40, 60 and 80 %.
 
-### 7. Where the maps come from
+### 7. What it costs to run
+
+The street model is 266k junctions and 273k links, but only the wet part of
+it is ever stepped: each step collects the junctions holding water, their
+links and their immediate neighbours, and every pass works on that set alone
+(newly wet junctions join it as the water spreads). The drain network does
+the same. The rain a junction receives is read straight out of the rain
+grid's intensity array through a cell index built once, rather than
+projected per junction per step. Nothing in the inner loops allocates: the
+conduit section, the infiltration curve, the inlet capacity and the pump
+rule are all written into reusable records or inlined.
+
+Measured on a storm covering ~13k wet junctions, in a 5-minute step: streets
+49 ms, drains 13 ms, rain grid 0.6 ms, a Street Flow rebuild 34 ms, a
+Ponding repaint 3 ms. An outcome is run only as far as the hour asked for and
+extended from its last snapshot afterwards: five hours takes about two
+seconds, three more about 0.7 s, and restoring an hour already run (one
+snapshot, plus replaying the rain grid to it) 40-140 ms.
+
+### 8. Where the maps come from
 
 *Flow Direction* and *Flow Paths* draw the D8 tree of the analysis grid (cells
 above the 98.5th percentile of accumulation, or above 5,000 m³ of storm water
@@ -510,6 +576,13 @@ stops above, so a colour always means the same amount of water.
 - Place storm cells (Gaussian, moving, editable) or rain a real forecast
   span onto the map, and watch the water run along 266k street junctions
   with backwater, ponding and kerb overtopping.
+- Pick any hour of a placed storm on the Outcome bar and press Play: the
+  scenario runs to that hour (about two seconds for five) and stops there,
+  extends rather than restarts when a later hour is asked for, and is kept
+  as half-hourly snapshots, so going back to an hour already run is instant.
+  Play again runs on from there. Storm tracks show where each cell has been
+  and where it is going, ghost it along the way while an hour is being
+  picked, and their end handle aims it.
 - Drain that water the way the city does: 3,493 surveyed grated inlets into
   9,399 surveyed pipe runs, Manning flow by pipe size, trunks that fill and
   back up, manholes that surcharge and spill back onto the street, 141 beach
@@ -549,20 +622,65 @@ stops above, so a colour always means the same amount of water.
 
 ### What has to change - the data pass
 
-Everything below is a number in `drainage-model.json`, the road network or
-`.env`; none of it touches the formulas.
+Every assumed number is a config key or a build-script constant, so
+replacing it is a data change, not a code change. The full inventory,
+ordered by how much each one moves the result, is the next section.
 
-| Data | Now | Needed | Where it plugs in |
+## Numbers to replace
+
+What the model runs on that is *assumed* rather than *measured*, grouped by
+where it enters the calculation and ordered by how much it moves the
+answer. Each row names the key or constant to change and the data that
+would replace it.
+
+### Tier 1 - these dominate what the map shows
+
+| Number | Now | Where | Replace with |
 | --- | --- | --- | --- |
-| Street heights | COP30 (30 m surface model, +3-4 m above the city benchmarks, noisy) | The city's `contour2m` and 366 benchmarks, or LiDAR | `scripts/build-road-network.py` -> `elev[]`; the pipe model reads its ground from the same array |
-| Shoreline | 27 street nodes clamped to 0 m flood from the sea at every high tide | Real beach-road heights (~2-3 m) | same as above; `VITE_SEA_OUTFALL_MAX_ELEV_M` then means what it says |
-| Pipe inverts | `ground - 0.6 m - pipe height` | Surveyed invert levels (the `ความลึกหลังท่อระบายน้ำ` depth points are a start) | `nodes.invert[]` in the model JSON |
-| Pump capacity | 1 m³/s everywhere, start 0.5 m / stop 0.1 m | Rated flow and levels per station | `VITE_PUMP_*` now; per-node fields when known |
-| Inlets | 3,493 of 3,800 grates attached; 307 had no pipe or street within reach; grate size defaulted where the survey has none | Check the unattached grates; survey grate sizes | `inlets` in the model JSON |
-| Clogging | 50 % of every grate | Inspection data, or seasonal | `VITE_INLET_CLOGGING` |
-| Outfall type | Coast within 250 m = sea; waterway within 40 m = canal; 49 networks got an assumed outfall | Confirm each outfall and its flap valve | `nodes.kind[]`, `nodes.assumedOutfall[]` |
-| Soil | Sandy loam (Horton 60 -> 12 mm/h) everywhere, 35 % pervious strip | Soil / land-cover map | `VITE_INFILTRATION_*`, `VITE_PERVIOUS_*` |
-| Rain observations | TMD once-a-day 24 h totals at 5 provincial gauges | 3-hourly gauges, or the city's own rain sensors | `src/weather.js` gauge fetch |
+| **Street heights** | COP30 30 m surface model, bilinear; +3-4 m above the city benchmarks, noisy | `scripts/build-road-network.py` -> `elev[]`; everything downstream reads it | City `contour2m` + 366 benchmarks, or LiDAR. The single biggest error term |
+| Height clean-up thresholds | despike 0.25 m x 6 passes, dead-end tip 0.1 m, noise pits <= 0.35 m or <= 3 junctions filled | `src/roadFlow.js`, `VITE_STREET_MAX_NOISE_PIT_M`, `VITE_STREET_MIN_BASIN_NODES` | Become unnecessary (or near zero) once heights are real |
+| **Pipe inverts** | `ground - 0.6 m cover - pipe height`; 22 % of conduits come out flatter than 0.1 % | `PIPE_COVER_DEPTH_M` in `scripts/build-drainage-model.py` -> `nodes.invert[]` | Surveyed invert levels; the 9,062 `ความลึกหลังท่อระบายน้ำ` depth points are a start |
+| **Pump capacity** | 1 m³/s every station, start 0.5 m / stop 0.1 m sump depth | `VITE_PUMP_RATED_M3S`, `VITE_PUMP_START_DEPTH_M`, `VITE_PUMP_STOP_DEPTH_M` | Rated flow and float-switch levels per station (the survey records names only) |
+| **Inlet clogging** | 50 % of every grate blocked | `VITE_INLET_CLOGGING` | Inspection data; realistically seasonal |
+| **Grate size** | 0.4 x 0.6 m where the survey has none; 50 % open area | `DEFAULT_GRATE_M`, `GRATE_OPEN_FRACTION` in `build-drainage-model.py` -> `inlets.perimeterM/openAreaM2` | Survey the unsized grates; 307 grates are also unattached (no pipe within 40 m or street within 25 m) |
+| **Street patch area** | 120 m² per junction, everywhere | `VITE_STREET_PATCH_M2`; sets depth-for-volume and the volume moved per link | Road width x junction spacing from `roadcl_arc` (`RC_WIDTH`, `S_WIDTH`) |
+| **Infiltration** | Horton 60 -> 12 mm/h, k = 2/h (sandy loam); pervious 5 % of a street patch, 35 % of the strip | `VITE_INFILTRATION_F0_MM_H`, `VITE_INFILTRATION_FC_MM_H`, `VITE_INFILTRATION_K_PER_H`, `VITE_PERVIOUS_STREET`, `VITE_PERVIOUS_STRIP` | Soil map or infiltrometer tests; pervious share from land cover |
+
+### Tier 2 - shape the answer noticeably
+
+| Number | Now | Where | Replace with |
+| --- | --- | --- | --- |
+| Catchment strip width | 60 m either side of a street, 90 % runoff | `VITE_STREET_CATCHMENT_WIDTH_M`, `VITE_STREET_RUNOFF_COEFF` | Block/parcel geometry; runoff coefficient by land cover |
+| Generic drain outside the survey | 150 mm/h per patch (a capacity) | `VITE_STREET_DRAIN_MM_H` | Extend the drain survey, or nothing - it is a stand-in |
+| Sea / canal / free outfalls | coast within 250 m = sea; OSM waterway within 40 m = canal; 49 networks got their lowest dead end declared an outfall | `DRAIN_SEA_OUTFALL_M`, `DRAIN_CANAL_OUTFALL_M`, `nodes.kind[]`, `nodes.assumedOutfall[]` | Confirm each outfall and which have flap valves (`VITE_OUTFALL_FLAP_VALVE` is one global switch) |
+| Street sea outfalls | dead ends at or below 1.5 m meet the tide | `VITE_SEA_OUTFALL_MAX_ELEV_M` | Coastline-based classification once heights are real |
+| Pipe roughness | n = 0.013 concrete, 0.011 HDPE/PVC | `MANNING_N` in `build-drainage-model.py` | Fine for new pipe; aged or silted concrete runs 0.015-0.02 |
+| Street roughness, speed, kerb | n = 0.015, v <= 3 m/s, kerb 0.15 m | `VITE_STREET_MANNING_N`, `VITE_STREET_MAX_FLOW_MS`, `VITE_STREET_CURB_M` | Standard values; kerb height varies by road |
+| Pipe size where unparseable | Ø0.60 m | `DEFAULT_SIZE_M` | Survey; the four "pressure main" runs are also treated as gravity pipes |
+| Manhole shaft area | 1 m² where the cover survey has no dimensions (~68k of 80k covers) | `DEFAULT_SHAFT_M2` -> `nodes.shaftM2[]` | Survey |
+| Tide datum | COP30 heights (EGM2008) taken as metres above local MSL, no offset | `src/tide.js` | The offset between EGM2008 and Ko Sichang MSL - decimetres, and it matters at the outfalls |
+
+### Tier 3 - numerical or scenario choices
+
+| Number | Now | Where |
+| --- | --- | --- |
+| Nominal outfall edges | street: 20 m, slope 0.0005, 0.5 m drop; pipe: 20 m conduit, 0.3 m drop, v <= 4 m/s | `src/roadFlow.js`, `src/pipeNetwork.js` - stability constants, not physics |
+| Snap distances | pipe ends 3 m; junction ground from a street within 60 m; pump within 80 m | `scripts/build-drainage-model.py` |
+| Rain-grid surface decay | tau = 900 s | `VITE_RAIN_DRAIN_TAU_S` - only weights the catchment layers, not the streets |
+| Storm noise | +/- 15 % | `VITE_RAIN_NOISE` - cosmetic |
+| Harmonic tide fallback | K1 0.55, O1 0.35, M2 0.25, S2 0.10 m, arbitrary phases | `src/hydraulics.js` - synthetic; the Ko Sichang or Laem Chabang gauge's constants would make offline mode honest |
+| Wind steering | 0.75 x the 850 hPa wind; 1.5 x the surface wind when no upper wind is served | `VITE_STORM_STEERING_FACTOR`, `VITE_STORM_STEERING_SURFACE_FACTOR` |
+| Ensemble jitter | track +/- 1500 m, speed +/- 30 %, bearing +/- 25°, intensity +/- 30 %, size +/- 20 %; threshold 5 cm | `VITE_ENSEMBLE_*` - guesses; a nowcast verification study would calibrate them |
+| Forecast sampling | Open-Meteo's 8-11 km model sampled at `VITE_FORECAST_GRID` points per side over 3x the area (10 -> 35 km cells) | set 20, or `VITE_FORECAST_AREA_SCALE=2` for the model's own resolution |
+| Rain observations | TMD once-a-day 24 h totals at 5 provincial gauges | `src/weather.js` - TMD's 3-hourly `Weather3Hours`, or the city's own sensors |
+
+**Already textbook, no data needed:** the weir and orifice coefficients
+(1.66 / 0.67), Manning's equation, the section geometry, gravity - `npm test`
+pins them.
+
+**Validate against, once the data is in:** the city's 17 flood-risk polygons
+(`พื้นที่เสี่ยงต่อการเกิดน้ำท่วม`) and the TMD gauges - the model should
+reproduce the first from real rain at the second.
 
 ## Data sources
 

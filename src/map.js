@@ -38,6 +38,8 @@ import { createPipeNetwork, loadDrainageModel, NODE_SEA_OUTFALL } from './pipeNe
 import { createTideSource } from './tide.js';
 import { createWindSource } from './wind.js';
 import { createEnsembleRunner } from './ensemble.js';
+import { createOutcomeTimeline } from './outcomeTimeline.js';
+import { createOutcomeBar } from './outcomeBar.js';
 import { createRainfallSimulator } from './rainfallSim.js';
 import {
   createCloudLayer,
@@ -200,10 +202,13 @@ export async function initializeMap() {
     ? createPondingLayer({
         lat: roadFlow.graph.lat,
         lng: roadFlow.graph.lng,
+        edges: roadFlow.graph.edges,
         depths: roadFlow.dynamic.depths,
-        floodAreaM2: roadFlow.dynamic.floodAreaM2,
-        patchAreaM2: roadFlow.dynamic.patchAreaM2,
         curbDepthM: roadFlow.dynamic.curbDepthM,
+        // Below the kerb the water is on the street itself; above it, on the
+        // catchment strip the model spreads it over.
+        streetWidthM: 10,
+        stripWidthM: config.streetCatchmentWidthM,
         stops: roadFlow.dynamic.depthStops
       })
     : L.layerGroup([]);
@@ -332,6 +337,10 @@ export async function initializeMap() {
   // render fires onWaterAdded synchronously (a later declaration would be TDZ).
   const RAIN_FLOW_REFRESH_MS = 2000;
   const STREET_RENDER_MS = 1200;
+  const PONDING_MS = 300;
+  // How far ahead a storm's track looks when nothing else is asking.
+  const TRACK_HORIZON_S = 2 * 3600;
+  let lastPondingUpdate = 0;
   let rainLayerActive = false;
   let rainRefreshTimer = null;
   let lastRainRefresh = 0;
@@ -353,6 +362,12 @@ export async function initializeMap() {
   let samplePoint = null;
   // Shift + drag on the forecast bar; built once the simulator exists.
   let forecastRain = null;
+  // The outcome timeline (the "Outcome at" bar) and the bar itself; built
+  // once the simulator exists, invalidated whenever the storms change.
+  let outcome = null;
+  let outcomeBar = null;
+  // The hour the outcome bar is parked on, waiting for Play.
+  let armedSeconds = null;
 
   // Storms are placed over the DEM extent, so the simulator shares its bounds.
   const rainfall = createRainfallSimulator({
@@ -381,6 +396,37 @@ export async function initializeMap() {
     // moment on the scenario's clock; its sliders can override it.
     defaultVelocity: () =>
       config.stormFollowsWind && wind.available ? wind.steeringVelocityAt(rainfall.scenarioTimeMs) : null,
+
+    // A placed, edited or removed storm is a different scenario: the
+    // precomputed outcomes no longer describe it.
+    onStormsChanged: () => {
+      outcome?.invalidate();
+      outcomeBar?.setComputed(0);
+      showOutcomeLabel();
+    },
+
+    // Play runs the scenario to whatever hour the outcome bar is parked on
+    // before the clock starts, so picking an hour and starting are two
+    // separate acts.
+    onPlayRequest: async () => {
+      if (armedSeconds === null || !outcome) {
+        return true;
+      }
+      const target = armedSeconds;
+      armedSeconds = null;
+      showOutcomeStatus('');
+      showOutcomeLabel();
+      await outcome.showAt(target);
+      // The hour is on the map now: the ghosts that predicted it would only
+      // sit on top of the water they predicted.
+      rainfall.stormTrack.setPreview(false);
+      rainfall.stormTrack.setHorizon(TRACK_HORIZON_S);
+      showOutcomeStatus('Showing this hour. Press Play again to run on from here.');
+      showOutcomeLabel();
+      // This press was spent going to the hour, so the clock stays where it
+      // landed rather than running straight past what was asked for.
+      return false;
+    },
 
     // Every simulation tick advances the street water: rain lands at the
     // current intensity and the water crawls downstream at street-flow speed.
@@ -413,6 +459,17 @@ export async function initializeMap() {
         return;
       }
 
+      // Ponding is cheap to repaint (a few ms), so it follows the water on
+      // its own short cadence rather than waiting for the street layer's
+      // rebuild, which can be seconds behind under a big flood.
+      const now = performance.now();
+      if (map.hasLayer(pondingLayer) && now - lastPondingUpdate >= PONDING_MS) {
+        lastPondingUpdate = now;
+        pondingLayer.update?.();
+      }
+      // The Outcome slider follows the clock while the storm plays.
+      showOutcomeLabel();
+
       if (!streetRenderTimer) {
         streetRenderTimer = setTimeout(() => {
           streetRenderTimer = null;
@@ -426,9 +483,6 @@ export async function initializeMap() {
             roadFlow.dynamic.render();
             const cost = performance.now() - started;
             streetRenderDelay = Math.min(6000, Math.max(STREET_RENDER_MS, cost * 6));
-          }
-          if (rainLayerActive && map.hasLayer(pondingLayer)) {
-            pondingLayer.update?.();
           }
           if (map.hasLayer(drainagePipes.layer)) {
             recolorPipes();
@@ -449,8 +503,168 @@ export async function initializeMap() {
       pondingLayer.update?.();
       refreshSamplePopup();
       updateDrainageReadout();
+      outcome?.invalidate();
+      outcomeBar?.setComputed(0);
+      outcomeBar?.follow(0);
+      armedSeconds = null;
+      showOutcomeStatus('');
+      rainfall.stormTrack?.setPreview(false);
+      rainfall.stormTrack?.setHorizon(TRACK_HORIZON_S);
+      showOutcomeLabel();
     }
   });
+
+  // Which rain-grid cell a street junction sits in never changes, so the
+  // water model reads the intensity field straight out of the array rather
+  // than asking for a lat/lng lookup per junction: that was 266k
+  // projections and object allocations on every step, and it dominated any
+  // long run.
+  if (roadFlow.dynamic) {
+    const cells = new Int32Array(roadFlow.graph.nodeCount);
+    for (let n = 0; n < roadFlow.graph.nodeCount; n += 1) {
+      cells[n] = rainfall.grid.indexAt(roadFlow.graph.lat[n], roadFlow.graph.lng[n]);
+    }
+    roadFlow.dynamic.setRainField(rainfall.grid.intensity, cells);
+  }
+
+  // --- the Outcome slider ------------------------------------------------------
+  //
+  // "What does it look like N hours in?" answered without playing N hours:
+  // the first drag runs the whole scenario once in the background (a day in
+  // about half a minute) and keeps a snapshot every half hour; after that
+  // the slider is instant, and Play carries on from wherever it stands.
+  const outcomeDom = {
+    root: document.querySelector('#sim-outcome'),
+    value: document.querySelector('#sim-outcome-value'),
+    status: document.querySelector('#sim-outcome-status')
+  };
+  const hoursText = (seconds) => {
+    const h = seconds / 3600;
+    return `${h % 1 ? h.toFixed(1) : h} h`;
+  };
+
+  // The bar's caption: what the moment on it is - the live clock, a
+  // precomputed outcome, or an invitation to compute one.
+  function showOutcomeLabel() {
+    if (!outcomeBar) {
+      return;
+    }
+    // The bar belongs to placed storms; a forecast span has its own
+    // timeline and drives the same grid.
+    const forecastHolds = Boolean(forecastRain?.active);
+    outcomeDom.root.classList.toggle('timeline--disabled', forecastHolds);
+    if (forecastHolds) {
+      outcomeDom.value.textContent = 'forecast span';
+      return;
+    }
+    if (outcome?.computing) {
+      outcomeDom.value.textContent = 'running the scenario…';
+      return;
+    }
+    if (armedSeconds !== null) {
+      outcomeDom.value.textContent = `${hoursText(armedSeconds)} · press Play`;
+      return;
+    }
+    // The bar marks the hour that was picked and gone to; it deliberately
+    // does NOT chase the clock. Running on from that hour is what the sim
+    // time in the header reads, and a bar that crept along with it could
+    // not be left parked anywhere.
+    if (outcome?.ready) {
+      outcomeDom.value.textContent = `${hoursText(outcome.shownSeconds)} · shown`;
+      return;
+    }
+    outcomeDom.value.textContent = rainfall.stormSystem.storms.length
+      ? 'drag to pick an hour'
+      : 'place a storm';
+  }
+
+  function showOutcomeStatus(text) {
+    outcomeDom.status.hidden = !text;
+    outcomeDom.status.textContent = text || '';
+  }
+
+  outcome = createOutcomeTimeline({
+    rainfall,
+    streets: roadFlow.dynamic,
+    pipes: pipeNet,
+    seaLevelAt: (seconds) => tide.levelAt(rainfall.scenarioTimeAt(seconds)),
+    onProgress: (doneSeconds, totalSeconds) => {
+      outcomeBar?.setComputed(doneSeconds);
+      showOutcomeStatus(
+        doneSeconds < totalSeconds
+          ? `Computing this scenario once: ${hoursText(doneSeconds)} of ${hoursText(totalSeconds)} done. The bar fills as it goes, and scrubbing is instant afterwards.`
+          : ''
+      );
+      showOutcomeLabel();
+    },
+    onShown: (seconds) => {
+      // The live models now hold the moment shown: repaint everything that
+      // reads them.
+      outcomeBar?.follow(seconds);
+      if (rainLayerActive && map.hasLayer(roadFlow.layer)) {
+        roadFlow.dynamic.render();
+      }
+      if (map.hasLayer(pondingLayer)) {
+        pondingLayer.update?.();
+      }
+      if (map.hasLayer(drainagePipes.layer)) {
+        recolorPipes();
+      }
+      updateDrainageReadout();
+      refreshSamplePopup();
+      scheduleRainFlowRefresh();
+      showOutcomeLabel();
+    }
+  });
+
+  outcomeBar = outcomeDom.root
+    ? createOutcomeBar({
+        root: outcomeDom.root,
+        totalHours: outcome.totalSeconds / 3600,
+        // The bar snaps to the spacing the scenario is snapshotted at, so
+        // the hour picked is exactly the hour run to and shown.
+        stepSeconds: outcome.snapshotEverySeconds,
+        onScrub: async (seconds, { settled }) => {
+          if (!roadFlow.dynamic) {
+            return;
+          }
+          if (rainfall.stormSystem.storms.length === 0) {
+            showOutcomeStatus('Place a storm first: the bar shows that storm’s outcome at any hour of the day.');
+            return;
+          }
+          if (forecastRain?.active) {
+            showOutcomeStatus('The Outcome bar is for placed storms; a forecast span has its own timeline.');
+            return;
+          }
+          if (ensemble.running) {
+            return;
+          }
+
+          // Dragging points the storm tracks at the hour under the pointer,
+          // so the ghosts show where the cells will have got to by then -
+          // before any water is run for it.
+          rainfall.stormTrack.setPreview(true);
+          rainfall.stormTrack.setHorizon(Math.max(900, seconds - outcome.shownSeconds));
+          if (!settled) {
+            return;
+          }
+
+          // Letting go picks the hour; Play is what goes there. Running a
+          // scenario the moment a pointer lifts took the decision away, and
+          // a scrub across the bar would have started one per hour.
+          rainfall.stop();
+          armedSeconds = seconds;
+          showOutcomeStatus(
+            seconds > outcome.computedSeconds
+              ? 'Press Play to run the storm to this hour and stop there.'
+              : 'Press Play to go to this hour.'
+          );
+          showOutcomeLabel();
+        }
+      })
+    : null;
+  outcomeBar?.setComputed(0);
+  showOutcomeLabel();
 
   // --- drainage readouts, surge slider and the ensemble -----------------------
   //
@@ -1024,6 +1238,8 @@ export async function initializeMap() {
       wind,
       ensemble,
       forecastRain,
+      forecast,
+      outcome,
       pondingLayer,
       drainagePipes,
       drainageCovers

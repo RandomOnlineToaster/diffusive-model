@@ -70,6 +70,61 @@ export function sectionOf(shape, widthM, heightM, depthM) {
     : circularSection(widthM, depthM);
 }
 
+/**
+ * The same, written into a record the caller owns and reuses.
+ *
+ * A network step evaluates a section per conduit per substep - tens of
+ * thousands of times a step - and returning a fresh object each time made
+ * the garbage collector, not the arithmetic, the cost of the model.
+ */
+export function sectionInto(out, shape, widthM, heightM, depthM) {
+  if (shape === SHAPE_BOX) {
+    const y = clamp(depthM, 0, heightM);
+    if (y <= 0) {
+      out.area = 0;
+      out.wettedPerimeter = 0;
+      out.hydraulicRadius = 0;
+      out.topWidth = 0;
+      return out;
+    }
+    const full = y >= heightM;
+    out.area = widthM * y;
+    out.wettedPerimeter = full ? 2 * (widthM + heightM) : widthM + 2 * y;
+    out.hydraulicRadius = out.area / out.wettedPerimeter;
+    out.topWidth = full ? 0 : widthM;
+    return out;
+  }
+
+  const D = widthM;
+  const y = clamp(depthM, 0, D);
+  if (y <= 0) {
+    out.area = 0;
+    out.wettedPerimeter = 0;
+    out.hydraulicRadius = 0;
+    out.topWidth = 0;
+    return out;
+  }
+  if (y >= D) {
+    out.area = (Math.PI * D * D) / 4;
+    out.wettedPerimeter = Math.PI * D;
+    out.hydraulicRadius = D / 4;
+    out.topWidth = 0;
+    return out;
+  }
+
+  const theta = 2 * Math.acos(1 - (2 * y) / D);
+  out.area = ((D * D) / 8) * (theta - Math.sin(theta));
+  out.wettedPerimeter = (D * theta) / 2;
+  out.hydraulicRadius = out.area / out.wettedPerimeter;
+  out.topWidth = D * Math.sin(theta / 2);
+  return out;
+}
+
+/** An empty section record, for sectionInto. */
+export function createSection() {
+  return { area: 0, wettedPerimeter: 0, hydraulicRadius: 0, topWidth: 0 };
+}
+
 // --- Manning's equation -----------------------------------------------------
 //
 //   v = (1 / n) * R^(2/3) * sqrt(S)       Q = A * v
