@@ -14,3 +14,7 @@ public/data/chonburi-dem.json
 
 scripts/__pycache__
 *.log
+
+# SWMM run products - regenerate with scripts/export-swmm-inp.mjs
+# (pattaya.out alone is 128 MB, past what GitHub accepts)
+swmm/
