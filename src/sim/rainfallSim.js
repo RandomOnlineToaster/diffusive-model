@@ -7,7 +7,7 @@
 // rainfallGrid.js; this module is orchestration only.
 
 import L from 'leaflet';
-import { createStormSystem, STORM_DEFAULTS } from './storm.js';
+import { createStormSystem, STORM_DEFAULTS, STORM_LIMITS } from './storm.js';
 import { createRainfallGrid, RAINFALL_LEGEND } from './rainfallGrid.js';
 import { createRainfallField, createStormHandles, createStormTrackLayer } from '../layers/rainfallLayer.js';
 import { config } from '../config.js';
@@ -47,7 +47,10 @@ export function createRainfallSimulator({
   });
 
   const stormSystem = createStormSystem();
-  const field = createRainfallField(grid);
+  // The field paints the simulated grid; the storms go with it so it can
+  // carry their falloff on past the edge of the grid, where nothing is
+  // simulated but a cell can still be placed and seen.
+  const field = createRainfallField(grid, stormSystem);
   const handles = createStormHandles({
     grid,
     stormSystem,
@@ -107,20 +110,17 @@ export function createRainfallSimulator({
   // Every storm gets the same set of sliders. Speed and bearing are not stored
   // on the storm directly - it carries a velocity vector - so they are read
   // and written through the helpers below.
+  // Ranges come from the model's own limits, so a slider and the map handle
+  // that sets the same thing by dragging always agree on what is allowed.
+  const metres = (v) => `${Math.round(v)} m`;
   const SLIDERS = [
-    { key: 'maxIntensityMmPerHour', label: 'Peak intensity', min: 5, max: 200, step: 5,
-      format: (v) => `${Math.round(v)} mm/h` },
-    { key: 'sigmaMeters', label: 'Sigma', min: 200, max: 6000, step: 100,
-      format: (v) => `${Math.round(v)} m` },
-    { key: 'rainRadiusMeters', label: 'Rain radius', min: 500, max: 15000, step: 250,
-      format: (v) => `${Math.round(v)} m` },
-    { key: 'cloudRadiusMeters', label: 'Cloud radius', min: 500, max: 25000, step: 250,
-      format: (v) => `${Math.round(v)} m` },
-    { key: 'speed', label: 'Speed', min: 0, max: 30, step: 0.5,
-      format: (v) => `${Number(v).toFixed(1)} m/s` },
-    { key: 'bearing', label: 'Bearing', min: 0, max: 359, step: 1,
-      format: (v) => `${String(Math.round(v)).padStart(3, '0')}\u00b0` }
-  ];
+    { key: 'maxIntensityMmPerHour', label: 'Peak intensity', format: (v) => `${Math.round(v)} mm/h` },
+    { key: 'sigmaMeters', label: 'Sigma', format: metres },
+    { key: 'rainRadiusMeters', label: 'Rain radius', format: metres },
+    { key: 'cloudRadiusMeters', label: 'Cloud radius', format: metres },
+    { key: 'speed', label: 'Speed', format: (v) => `${Number(v).toFixed(1)} m/s` },
+    { key: 'bearing', label: 'Bearing', format: (v) => `${String(Math.round(v)).padStart(3, '0')}\u00b0` }
+  ].map((slider) => ({ ...slider, ...STORM_LIMITS[slider.key] }));
 
   let selectedId = null;
   let running = false;
@@ -398,6 +398,9 @@ export function createRainfallSimulator({
     // being previewed on their own.
     if (externalRain) {
       externalRain.stormsChanged();
+      // A cell outside the grid is painted straight from the storm, so it
+      // has to be repainted even when no cell of the grid has changed.
+      field.redraw();
       return;
     }
 
@@ -768,6 +771,9 @@ export function createRainfallSimulator({
     refreshStorms() {
       refreshHandles();
       refreshStormCards();
+      // Nothing here recomposes the grid, so the field would keep the old
+      // picture of any cell painted from the storm rather than from a cell.
+      field.redraw();
     },
 
     /**

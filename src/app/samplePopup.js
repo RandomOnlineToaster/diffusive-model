@@ -8,7 +8,7 @@ import { NODE_SEA_OUTFALL } from '../hydro/pipeNetwork.js';
 // recomputed on every tick, so an open popup reads live instead of freezing
 // at whatever the values were when it was clicked.
 
-export function createSamplePopup({ map, rainfall, roadFlow, pipeNet, isForecastActive }) {
+export function createSamplePopup({ map, rainfall, roadFlow, pipeNet, isForecastRouted }) {
   let samplePoint = null;
 
   function content() {
@@ -23,10 +23,11 @@ export function createSamplePopup({ map, rainfall, roadFlow, pipeNet, isForecast
     lines.push(`Rain here: ${intensity.toFixed(1)} mm/h`);
     lines.push(`Water on ground: ${surfaceMm.toFixed(1)} mm`);
 
-    // Forecast rain is routed along the streets, not ponded, so there is no
-    // standing depth to read.
-    const forecastHolds = isForecastActive();
-    const street = forecastHolds ? null : roadFlow.dynamic?.depthNear(lat, lng, 60);
+    // Forecast rain steps the same street model a placed storm does, so
+    // there is a standing depth to read either way - unless the span is
+    // running with its water off, when the rain is only routed.
+    const routed = isForecastRouted?.() ?? false;
+    const street = routed ? null : roadFlow.dynamic?.depthNear(lat, lng, 60);
     if (street) {
       const here = Math.round(street.distanceM) <= 20 ? '' : ` (${Math.round(street.distanceM)} m away)`;
       lines.push(`Street water: ~${(street.depthM * 100).toFixed(0)} cm, ${street.severity}${here}`);
@@ -43,7 +44,7 @@ export function createSamplePopup({ map, rainfall, roadFlow, pipeNet, isForecast
       if (street.flowM3s > 0.05) {
         lines.push(`Street flow: ~${street.flowM3s.toFixed(1)} m³/s`);
       }
-    } else if (forecastHolds) {
+    } else if (routed) {
       lines.push('Street water: forecast rain runs along the streets (see Street Flow)');
     } else {
       lines.push('Street water: none within 60 m');

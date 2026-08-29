@@ -224,14 +224,57 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     // the surveyed heights plenty of streets a kilometre inland sit under a
     // metre and a half, and the tide has no business reaching them - so the
     // build marks which junctions are near the zero-metre contour.
+    //
+    // Two ways to meet it. A low DEAD END near the shore does, as it always
+    // has. And a junction ON the shore does whatever else its street
+    // connects to: water standing at the water's edge runs off the edge, it
+    // does not follow the beach road along the coast looking for a dead end
+    // to leave by. Nearly every low junction on the shore is a through
+    // junction - 1,967 of 2,073 - so without this the beachfront held water
+    // it had nowhere to put, which is exactly where a flood is least
+    // believable.
     const coastal = data.coastal;
+    const shoreM = data.shoreM;
     const seaOutfall = new Uint8Array(nodeCount);
     let seaOutfallCount = 0;
+    let shoreOutfallCount = 0;
     for (let n = 0; n < nodeCount; n += 1) {
-      const onShore = coastal ? coastal[n] === 1 : true;
-      if (downstream[n] < 0 && onShore && elev[n] <= config.seaOutfallMaxElevM) {
+      if (elev[n] > config.seaOutfallMaxElevM) {
+        continue;
+      }
+      const atShore = shoreM ? shoreM[n] >= 0 && shoreM[n] <= config.seaOutfallShoreM : false;
+      const nearShore = coastal ? coastal[n] === 1 : true;
+      if (atShore || (downstream[n] < 0 && nearShore)) {
         seaOutfall[n] = 1;
         seaOutfallCount += 1;
+        if (atShore && downstream[n] >= 0) {
+          shoreOutfallCount += 1;
+        }
+      }
+    }
+
+    // The third way out, beside the grates and the ground: open water - a
+    // khlong, a river, a lake, a reservoir, the retention pond. Runoff runs
+    // downhill along the streets until it reaches one, and a street that
+    // reaches a bank sheds over it - it does not wait for a grate. Without
+    // this the water ran downhill as the contours say and then stood at the
+    // bottom, which is where a quarter of a storm was still sitting an hour
+    // later.
+    //
+    // The water body itself is not modelled - it never fills and never backs
+    // up - so it always takes what it is given. In a real flood it does not:
+    // the city's plan has Khlong Suea Phaeo overflowing into Khlong Naklua,
+    // and the retention pond holds only 100,000 m3. Channels that can fill
+    // are still on the list.
+    const waterM = data.waterM;
+    const canalOutfall = new Uint8Array(nodeCount);
+    let canalOutfallCount = 0;
+    if (waterM && config.canalOutfallM > 0) {
+      for (let n = 0; n < nodeCount; n += 1) {
+        if (waterM[n] >= 0 && waterM[n] <= config.canalOutfallM && seaOutfall[n] === 0) {
+          canalOutfall[n] = 1;
+          canalOutfallCount += 1;
+        }
       }
     }
 
@@ -312,6 +355,13 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     // straight out of the array. The callback stays as the fallback.
     let rainField = null;
     let rainCells = null;
+    // How often the attached drains are stepped inside a street step.
+    const PIPE_STEP_SECONDS = 60;
+    // How far the fastest water may cross in one substep.
+    const SUBSTEP_REACH_M = 15;
+    // This step's rain rate per junction, read once and then spent a
+    // substep at a time.
+    const rainRate = new Float32Array(nodeCount);
 
     // --- the active set ---------------------------------------------------
     // Only junctions holding water, and the ones they can reach this
@@ -418,6 +468,8 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
 
     let peak = 0;
     let pipes = null;
+    let inletOfStreet = null;
+    let extraInlets = [];
     let rainedM3 = 0;
     let drainedM3 = 0; // the generic drain term, outside the surveyed network
     let infiltratedM3 = 0;
@@ -485,10 +537,31 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
        * Couple the street model to the underground drainage (pipeNetwork.js).
        * Its inlets become the only way down for the streets it covers, so a
        * surcharged network visibly backs the street up; outside its reach
-       * the generic drain term stays.
+       * the generic drain term stays. Once attached, the drains are stepped
+       * inside the streets' own substeps: do not step them separately.
        */
       attachPipes(pipeNetwork) {
         pipes = pipeNetwork;
+        // Which inlet belongs to which street junction. The inlets are
+        // visited every substep now, and walking all 45k of them to find the
+        // handful under water cost more than the water did; the active set
+        // is a few thousand junctions, so it is walked instead. The build
+        // puts at most one inlet on a junction, and any extra goes on a
+        // short list that is walked the old way.
+        inletOfStreet = new Int32Array(nodeCount).fill(-1);
+        extraInlets = [];
+        const streets = pipeNetwork?.inlets?.street;
+        for (let k = 0; k < (streets?.length ?? 0); k += 1) {
+          const s = streets[k];
+          if (s < 0 || s >= nodeCount) {
+            continue;
+          }
+          if (inletOfStreet[s] < 0) {
+            inletOfStreet[s] = k;
+          } else {
+            extraInlets.push(k);
+          }
+        }
       },
 
       /**
@@ -516,6 +589,9 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
         if (m3 > 0 && n >= 0 && n < nodeCount) {
           volM3[n] += m3;
           spilledInM3 += m3;
+          // Spilled mid-step, from inside a substep: it has to be in the
+          // active set to move on in the next one.
+          activate(n);
         }
       },
 
@@ -545,6 +621,8 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
           spilledInM3,
           driedFilmM3,
           seaOutfalls: seaOutfallCount,
+          shoreOutfalls: shoreOutfallCount,
+          canalOutfalls: canalOutfallCount,
           seaLevelM
         };
       },
@@ -574,9 +652,32 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
             }
           }
         }
+        // How long each wet junction has been wet, for Horton's curve: a
+        // restored state that forgot this started every junction's soakage
+        // again at the fast initial rate, and a run continued from a
+        // snapshot soaked a third more than the same run played through.
+        // Sparse - the wet junctions are a small share of the network.
+        let wetCount = 0;
+        for (let n = 0; n < nodeCount; n += 1) {
+          if (volM3[n] > 0) {
+            wetCount += 1;
+          }
+        }
+        const wetIndex = new Int32Array(wetCount);
+        const wetSinceAt = new Float32Array(wetCount);
+        let at = 0;
+        for (let n = 0; n < nodeCount; n += 1) {
+          if (volM3[n] > 0) {
+            wetIndex[at] = n;
+            wetSinceAt[at] = wetSince[n];
+            at += 1;
+          }
+        }
         return {
           depthMm,
           outSlot,
+          wetIndex,
+          wetSinceAt,
           totals: {
             rainedM3,
             drainedM3,
@@ -610,6 +711,16 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
           wetSince[n] = volume > 0 ? totals.simSeconds : -1;
           liveDown[n] = outSlot[n] >= 0 ? adjNode[adjOffset[n] + outSlot[n]] : -1;
         }
+        // The Horton clock of each junction that was wet, where the snapshot
+        // carries it (older snapshots do not, and start their curves again).
+        if (snap.wetIndex && snap.wetSinceAt) {
+          for (let i = 0; i < snap.wetIndex.length; i += 1) {
+            const n = snap.wetIndex[i];
+            if (volM3[n] > 0) {
+              wetSince[n] = snap.wetSinceAt[i];
+            }
+          }
+        }
         flowM3.fill(0);
         edgeRate.fill(0);
         rainedM3 = totals.rainedM3;
@@ -632,21 +743,18 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
         }
         liveDownFrozen = false;
 
-        // Rain lands first, so this step's rain can flow within this step.
-        // runoffFactor x patch area is the catchment the junction collects.
-        // The same pass collects the active set: every junction holding
-        // water, with its links and neighbours.
+        // Read this step's rain and collect the active set: every junction
+        // holding water or standing under rain, with its links and
+        // neighbours. The rain itself is spent inside the substep loop, a
+        // slice at a time - landing a whole step's worth at once floods a
+        // junction and then drains it, which is not the same water as the
+        // same rain arriving while it flows away.
         clearActive();
-        const rainVolumeScale = dtSeconds / 3.6e6;
         for (let n = 0; n < nodeCount; n += 1) {
           const cell = rainCells ? rainCells[n] : -1;
           const intensity = rainCells ? (cell >= 0 ? rainField[cell] : 0) : intensityAt(lat[n], lng[n]);
-          if (intensity > 0) {
-            const addedM3 = intensity * rainVolumeScale * patchM2[n] * runoffFactor[n];
-            volM3[n] += addedM3;
-            rainedM3 += addedM3;
-          }
-          if (volM3[n] > 0) {
+          rainRate[n] = intensity;
+          if (volM3[n] > 0 || intensity > 0) {
             activate(n);
           }
         }
@@ -659,65 +767,122 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
           return;
         }
 
-        // Inlets: every grated cover takes the street's water down at the
-        // rate its grate passes (a weir at shallow depths, an orifice once
-        // drowned - hydraulics.js), and only as much as the manhole below
-        // has room for. A surcharged network refuses it, and the street
-        // stays wet: that is how a full trunk shows on the surface.
-        if (pipes) {
-          const { count, street, node, perimeterM, openAreaM2 } = pipes.inlets;
-          const clogging = config.inletClogging;
-
-          for (let k = 0; k < count; k += 1) {
-            const s = street[k];
-            const volume = volM3[s];
-            if (volume <= 0) {
-              continue;
-            }
-            const depth = depthOf(volume, s);
-            if (depth < MIN_FLOW_DEPTH) {
-              continue;
-            }
-
-            // inletCapture's rule, inlined: min(weir, orifice) less the
-            // blocked share. Called per inlet per step, and its argument
-            // object is otherwise garbage.
-            const weir = INLET_WEIR * perimeterM[k] * Math.sqrt(depth * depth * depth);
-            const orifice = INLET_ORIFICE * openAreaM2[k] * Math.sqrt(2 * GRAVITY * depth);
-            let wanted = (weir < orifice ? weir : orifice) * (1 - clogging) * dtSeconds;
-            if (wanted > volume) {
-              wanted = volume;
-            }
-            const acceptedM3 = pipes.offer(node[k], wanted);
-            if (acceptedM3 > 0) {
-              volM3[s] -= acceptedM3;
-              capturedM3 += acceptedM3;
-            }
-          }
-        }
-
-        // Substep so the fastest possible water cannot jump past an edge, and
-        // so head differences relax gradually instead of oscillating.
+        // Substep so the fastest water cannot jump past an edge, and so head
+        // differences relax gradually instead of oscillating.
+        //
+        // The cap is what decides how long a step may be asked for. At 8 it
+        // was binding from about a minute upwards, and at the five-minute
+        // step the outcome timeline and a forecast span take, it left
+        // substeps of 37 s - water at 3 m/s crossing 110 m, past whole links
+        // at a time. At 20 a five-minute step resolves to 15 s, which a sweep
+        // from 5 s to 300 s puts inside the band where the answer has stopped
+        // changing.
+        //
+        // Sizing substeps by the fastest water actually moving, rather than
+        // by this ceiling, was tried twice and does not work: across a whole
+        // province SOMETHING is always running at the 3 m/s cap - even under
+        // 2 mm/h, where a strip of runoff concentrates on a steep street -
+        // so the adaptive length never rises. Forcing it up with a floor did
+        // make it cheap, but a sweep against 5 s substeps showed it had
+        // simply made the coarse answer universal: the deepest water read
+        // 238 cm where the fine run said 127 cm.
         const manningK = 1 / config.streetManningN;
         const vMax = config.streetFlowMaxMs;
-        const substeps = Math.min(8, Math.max(1, Math.ceil((vMax * dtSeconds) / 15)));
-        const dtSub = dtSeconds / substeps;
         // Street drains: a capacity, not a proportion. Below the curb only
         // the street patch drains; a spread flood soaks over its whole plain.
         const drainRate = config.streetDrainMmPerHour / 3.6e6; // m per second
 
+        const substeps = Math.min(20, Math.max(1, Math.ceil((vMax * dtSeconds) / SUBSTEP_REACH_M)));
+        const dtSub = dtSeconds / substeps;
+        const rainScaleSub = dtSub / 3.6e6;
+        const clogging = config.inletClogging;
+        let pipeDue = 0;
+
         for (let pass = 0; pass < substeps; pass += 1) {
-          // Standing depths for this substep, from the frozen volumes, and
-          // the per-substep buffers cleared - both over the active set only,
-          // which is also the only set anything below writes to.
+          const lastPass = pass === substeps - 1;
           const stepped = activeCount;
+
+          // One pass over the active set for three things that used to take
+          // three: this substep's slice of the rain (runoffFactor x patch
+          // area is the catchment the junction collects), the inlet under
+          // it if it has one, and the standing depth the phases below read.
+          //
+          // Inlets: every grated cover takes the street's water down at the
+          // rate its grate passes (a weir at shallow depths, an orifice once
+          // drowned - hydraulics.js), and only as much as the manhole below
+          // has room for. A surcharged network refuses it, and the street
+          // stays wet: that is how a full trunk shows on the surface. Per
+          // substep, like the rain: taken once for a whole long step, a
+          // grate captured at the depth the step began with, which over five
+          // minutes is a different amount of water.
+          const inlets = pipes && inletOfStreet ? pipes.inlets : null;
           for (let i = 0; i < stepped; i += 1) {
             const n = activeNodes[i];
-            const volume = volM3[n];
+            const rate = rainRate[n];
+            if (rate > 0) {
+              const addedM3 = rate * rainScaleSub * patchM2[n] * runoffFactor[n];
+              volM3[n] += addedM3;
+              rainedM3 += addedM3;
+            }
+
+            let volume = volM3[n];
+            if (inlets && volume > 0) {
+              const k = inletOfStreet[n];
+              if (k >= 0) {
+                const depth = depthOf(volume, n);
+                if (depth >= MIN_FLOW_DEPTH) {
+                  // inletCapture's rule, inlined: min(weir, orifice) less
+                  // the blocked share. Called per inlet per substep, and its
+                  // argument object is otherwise garbage.
+                  const weir = INLET_WEIR * inlets.perimeterM[k] * Math.sqrt(depth * depth * depth);
+                  const orifice =
+                    INLET_ORIFICE * inlets.openAreaM2[k] * Math.sqrt(2 * GRAVITY * depth);
+                  let wanted = (weir < orifice ? weir : orifice) * (1 - clogging) * dtSub;
+                  if (wanted > volume) {
+                    wanted = volume;
+                  }
+                  const acceptedM3 = pipes.offer(inlets.node[k], wanted);
+                  if (acceptedM3 > 0) {
+                    volume -= acceptedM3;
+                    volM3[n] = volume;
+                    capturedM3 += acceptedM3;
+                  }
+                }
+              }
+            }
+
             depthCache[n] = volume > 0 ? depthOf(volume, n) : 0;
             proposedOut[n] = 0;
             terminalQ[n] = 0;
             seaInflow[n] = 0;
+          }
+          // The few junctions carrying a second inlet, which the pass above
+          // cannot reach through its one-per-junction index.
+          if (inlets && extraInlets.length > 0) {
+            for (let j = 0; j < extraInlets.length; j += 1) {
+              const k = extraInlets[j];
+              const s = inlets.street[k];
+              const volume = volM3[s];
+              if (volume <= 0) {
+                continue;
+              }
+              const depth = depthOf(volume, s);
+              if (depth < MIN_FLOW_DEPTH) {
+                continue;
+              }
+              const weir = INLET_WEIR * inlets.perimeterM[k] * Math.sqrt(depth * depth * depth);
+              const orifice = INLET_ORIFICE * inlets.openAreaM2[k] * Math.sqrt(2 * GRAVITY * depth);
+              let wanted = (weir < orifice ? weir : orifice) * (1 - clogging) * dtSub;
+              if (wanted > volume) {
+                wanted = volume;
+              }
+              const acceptedM3 = pipes.offer(inlets.node[k], wanted);
+              if (acceptedM3 > 0) {
+                volM3[s] -= acceptedM3;
+                capturedM3 += acceptedM3;
+                depthCache[s] = volM3[s] > 0 ? depthOf(volM3[s], s) : 0;
+              }
+            }
           }
           const steppedEdges = activeEdgeCount;
           for (let i = 0; i < steppedEdges; i += 1) {
@@ -794,11 +959,14 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
           // nominal edge whose far side is always lower.
           for (let i = 0; i < stepped; i += 1) {
             const n = activeNodes[i];
-            if (downstream[n] >= 0) {
-              continue;
-            }
             const available = depthCache[n];
             const sea = seaOutfall[n] === 1 && seaLevelM > -Infinity;
+            // A dead end leaves by its nominal edge as it always has; a
+            // junction that is not one leaves into the sea, or over the bank
+            // into a channel beside it.
+            if (downstream[n] >= 0 && !sea && canalOutfall[n] !== 1) {
+              continue;
+            }
 
             if (sea && seaLevelM > elev[n] + available + 1e-4) {
               // Drowned: the sea stands above the street water here, so it
@@ -961,6 +1129,23 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
             if (next > 0) {
               activate(n);
             }
+          }
+
+          // The drains, stepped inside the street's own step. Stepped once
+          // per outer step instead, a manhole that filled in the first
+          // substep refused the inlet above it for the rest of the step, and
+          // a five-minute step took a quarter less down the grates than the
+          // same rain in short steps. Every minute of simulated time rather
+          // than every substep: a call into the pipe model costs about as
+          // much whatever its dt, and at a minute the capture is within a
+          // few percent of stepping them together. The last substep always
+          // flushes, so the two clocks agree at the end of every step. Water
+          // a manhole spills comes straight back onto its street through
+          // addWater, ready for the next substep.
+          pipeDue += dtSub;
+          if (pipes && (pipeDue >= PIPE_STEP_SECONDS || lastPass)) {
+            pipes.step(pipeDue);
+            pipeDue = 0;
           }
 
           simSeconds += dtSub;

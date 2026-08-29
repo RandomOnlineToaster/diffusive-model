@@ -143,7 +143,7 @@ export function createRainfallGrid({ bounds, columns = 240, rows = 240, drainTau
      * Only cells inside a storm's rain radius are visited, so cost scales with
      * storm area rather than grid size.
      */
-    compose(storms, { noiseAmplitude = 0, base = null } = {}) {
+    compose(storms, { noiseAmplitude = 0, base = null, atSeconds = elapsedSeconds } = {}) {
       // With a base the storms are built apart and summed onto it; without
       // one they are the field itself, and are built straight into it.
       const target = base ? stormRain : intensity;
@@ -174,8 +174,10 @@ export function createRainfallGrid({ bounds, columns = 240, rows = 240, drainTau
       // stays dominant, and to the storms alone - a published forecast is not
       // ours to add texture to. Smooth over ~1 km rather than per-cell random,
       // which would just look like static.
+      // The texture drifts with time - the grid's own clock unless the caller
+      // is composing the field for some other moment.
       if (noiseAmplitude > 0) {
-        applyNoise(target, columns, rows, elapsedSeconds, noiseAmplitude);
+        applyNoise(target, columns, rows, atSeconds, noiseAmplitude);
       }
 
       if (base) {
@@ -280,8 +282,9 @@ export function createRainfallGrid({ bounds, columns = 240, rows = 240, drainTau
       for (let index = 0; index < cellCount; index += 1) {
         const offset = index * 4;
         const value = field[index] * scale;
+        const alpha = intensityAlpha(value);
 
-        if (value < INTENSITY_STOPS[0].mmPerHour) {
+        if (alpha <= 0) {
           pixels[offset + 3] = 0;
           continue;
         }
@@ -290,14 +293,34 @@ export function createRainfallGrid({ bounds, columns = 240, rows = 240, drainTau
         pixels[offset] = r;
         pixels[offset + 1] = g;
         pixels[offset + 2] = b;
-        // Translucent throughout: the field is context, and the streets and
-        // flow lines underneath have to stay readable through it.
-        pixels[offset + 3] = Math.min(145, 35 + value * 1.3);
+        pixels[offset + 3] = alpha;
       }
 
       return pixels;
     }
   };
+}
+
+/**
+ * How opaque a rain rate is painted, 0-255. Translucent throughout: the field
+ * is context, and the streets and flow lines underneath have to stay readable
+ * through it. Nothing below the first legend stop is drawn at all.
+ */
+export function intensityAlpha(value) {
+  return value < INTENSITY_STOPS[0].mmPerHour ? 0 : Math.min(145, 35 + value * 1.3);
+}
+
+/**
+ * The same colour as one of the field's pixels, as CSS - for painting a rain
+ * rate anywhere the grid's own image cannot reach.
+ */
+export function intensityCss(value) {
+  const alpha = intensityAlpha(value);
+  if (alpha <= 0) {
+    return 'rgba(0, 0, 0, 0)';
+  }
+  const [r, g, b] = rampColor(value);
+  return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${(alpha / 255).toFixed(3)})`;
 }
 
 // Continuous colour for a rain rate, interpolated between the legend stops.

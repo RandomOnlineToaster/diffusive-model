@@ -221,7 +221,7 @@ export async function initializeMap() {
         streetWidthM: 10,
         stripWidthM: config.streetCatchmentWidthM,
         stops: roadFlow.dynamic.depthStops
-      })
+      }, { isInside: isInsideProvince })
     : L.layerGroup([]);
   console.info(
     `Sea level: ${tide.source}` +
@@ -326,6 +326,11 @@ export async function initializeMap() {
   let outcomeControl = null;
   let forecastRain = null;
   const isForecastActive = () => Boolean(forecastRain?.active);
+  // A span with its water window set to zero draws and routes the rain but
+  // steps nothing, the way a forecast did before the models were wired to
+  // it: the street layer, the panel tile and the sample point all read the
+  // routed surface water instead of standing depths.
+  const isForecastRouted = () => isForecastActive() && !forecastRain.waterEnabled;
 
   // --- the rainfall simulator ---------------------------------------------------------
   // Storms are placed over the DEM extent, so the simulator shares its bounds.
@@ -336,10 +341,11 @@ export async function initializeMap() {
 
     // Live total for the "Water on map" tile: what is standing on the street
     // network right now, which falls as it drains - unlike the cumulative
-    // rain volume beside it. Under forecast rain the streets are routed, not
-    // ponded, so the tile reads the water on the ground instead.
+    // rain volume beside it. Forecast rain runs the same street model, so
+    // the tile means the same thing either way - unless its water is off,
+    // when the water on the ground is all there is to report.
     getWaterOnMapM3: () =>
-      isForecastActive()
+      isForecastRouted()
         ? rainfall.grid.surfaceVolumeM3()
         : roadFlow.dynamic
           ? roadFlow.dynamic.totals().storedM3
@@ -391,8 +397,8 @@ export async function initializeMap() {
       const seaLevelM = tide.levelAt(rainfall.scenarioTimeMs);
       roadFlow.dynamic.setSeaLevel(seaLevelM);
       pipeNet?.setSeaLevel(seaLevelM);
+      // The streets step the drains inside their own substeps.
       roadFlow.dynamic.step((lat, lng) => rainfall.intensityAt(lat, lng), dtSeconds);
-      pipeNet?.step(dtSeconds);
       readout?.update();
 
       if (!rainLayerActive) {
@@ -470,11 +476,12 @@ export async function initializeMap() {
     state: {
       isRainActive: () => rainLayerActive,
       isForecastActive,
+      isForecastRouted,
       isPathsClassic: () => flowPathsClassic
     },
     restorePipes: () => pipes.restore()
   });
-  samplePopup = createSamplePopup({ map, rainfall, roadFlow, pipeNet, isForecastActive });
+  samplePopup = createSamplePopup({ map, rainfall, roadFlow, pipeNet, isForecastRouted });
   readout = createDrainageReadout({ rainfall, tide, wind, pipeNet, roadFlow });
   ensemble = createEnsembleControl({
     map,
@@ -518,10 +525,28 @@ export async function initializeMap() {
     // The simulator's speed slider paces this the way it paces the storm
     // clock, so one control drives both halves of the card.
     playHoursPerSecond: () => config.forecastPlayHoursPerSecond * rainfall.speedMultiplier ** FORECAST_SPEED_CURVE,
-    refreshLayers: () => {
+    // A forecast is the realistic input, so it runs the same physics a
+    // placed storm does rather than only tinting the ground it fell on.
+    streets: roadFlow.dynamic,
+    pipes: pipeNet,
+    seaLevelAt: (ms) => tide.levelAt(ms),
+    // The rain-driven layers follow the moment shown at once; the
+    // water-driven ones only once the water has been run there.
+    refreshLayers: ({ water = true } = {}) => {
       flowWeighting.apply();
-      flowWeighting.refreshStreets();
       samplePopup.refresh();
+      if (!water) {
+        return;
+      }
+      flowWeighting.refreshStreets();
+      if (map.hasLayer(pondingLayer)) {
+        pondingLayer.update?.();
+      }
+      if (map.hasLayer(drainagePipes.layer)) {
+        pipes.recolour();
+      }
+      pumpStations.update();
+      readout.update();
     },
     onState: (state) => forecast.card.setSeries(state)
   });

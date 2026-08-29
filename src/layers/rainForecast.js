@@ -304,7 +304,11 @@ function createForecastCard({ boundary }) {
   /** Put one forecast hour on the map and in the readouts. */
   function showBucket(index) {
     const state = active();
-    if (!state?.grid) {
+    // The grid is set on the source at once, but the timeline it drives is
+    // rebuilt a tick later, through an animation. Anything asking for a step
+    // in between - the province outlook landing, say - would be reading a
+    // timeline that does not exist yet.
+    if (!state?.grid || stepCount === 0 || days.length === 0) {
       return false;
     }
 
@@ -838,6 +842,7 @@ function createForecastCard({ boundary }) {
       }
 
       const entering = !series;
+      const wasCatchingUp = series?.catchingUp;
       series = state;
       if (entering) {
         dom.timeline.classList.add('timeline--series');
@@ -845,6 +850,16 @@ function createForecastCard({ boundary }) {
       const bucket = bucketOfMs(state.shownMs);
       if (entering || bucket !== current) {
         showBucket(bucket);
+      }
+      // The water is stepped through every hour it rains, so a moment that
+      // has not been reached yet has to be computed to get to. Say so while
+      // it works, rather than looking stuck.
+      if (state.catchingUp) {
+        setHint(
+          `Running the water through the ${state.windowHours} hours before this moment… the streets and drains follow when it arrives.`
+        );
+      } else if (wasCatchingUp) {
+        refreshHint();
       }
       placeSeriesHead();
     },

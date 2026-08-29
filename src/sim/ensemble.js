@@ -77,7 +77,6 @@ export function createEnsembleRunner({ rainfall, streets, pipes = null, seaLevel
           stormSystem.advance(stepS);
           grid.step(stormSystem, stepS, { noiseAmplitude: config.rainNoiseAmplitude });
           streets.step(intensityAt, stepS);
-          pipes?.step(stepS);
 
           const depths = streets.depths;
           for (let n = 0; n < nodeCount; n += 1) {

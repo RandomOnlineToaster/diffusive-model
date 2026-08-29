@@ -17,6 +17,36 @@
 // sigma sets how quickly rain falls off from the centre; rainRadius gives the
 // storm a finite edge so the exponential tail does not drizzle over the whole
 // province.
+/**
+ * What each of a storm's properties may be set to, shared by the panel's
+ * sliders and the map's drag handles so that typing a value and dragging one
+ * cannot disagree - dragging the rain ring out used to take a cell past what
+ * its own slider could express, and the next touch of that slider snapped it
+ * back.
+ *
+ * The rain radius reaches 25 km because the ring is dragged, not typed, and
+ * a gesture that stops short of the pointer reads as broken; sigma reaches
+ * far enough that a cell scaled to any of that radius keeps its shape
+ * (a rain radius of 3 sigma, as the defaults are) without hitting its limit.
+ */
+export const STORM_LIMITS = {
+  maxIntensityMmPerHour: { min: 5, max: 200, step: 5 },
+  sigmaMeters: { min: 200, max: 10000, step: 100 },
+  rainRadiusMeters: { min: 500, max: 25000, step: 250 },
+  cloudRadiusMeters: { min: 500, max: 40000, step: 250 },
+  speed: { min: 0, max: 30, step: 0.5 },
+  bearing: { min: 0, max: 359, step: 1 }
+};
+
+/** A value held inside its limit, for the handles that set one by dragging. */
+export function clampStorm(key, value) {
+  const limit = STORM_LIMITS[key];
+  if (!limit || !Number.isFinite(value)) {
+    return value;
+  }
+  return Math.min(limit.max, Math.max(limit.min, value));
+}
+
 export const STORM_DEFAULTS = {
   maxIntensityMmPerHour: 100,
   sigmaMeters: 1000,

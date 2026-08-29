@@ -10,10 +10,82 @@
 // rather than 160,000 shapes.
 
 import L from 'leaflet';
+import { intensityAlpha, intensityCss } from '../sim/rainfallGrid.js';
+import { clampStorm, stormIntensityAt } from '../sim/storm.js';
+
+/**
+ * Where a storm's gradient gets its colour stops, in metres from the centre.
+ *
+ * They follow the Gaussian's own scale rather than the radius: eight to a
+ * sigma out to 3 sigma, where it has fallen to 1% of its peak, then four
+ * more out to the rain edge where it is cut off. Spacing them evenly along
+ * the radius instead left a cell whose sigma is small against its rain
+ * radius - 1 km inside 17 km, which the sliders allow - with three stops
+ * across everything you can actually see, and it read as flat bands.
+ */
+function gradientDistances(storm) {
+  const radius = storm.rainRadiusMeters;
+  const step = storm.sigmaMeters / 8;
+  const distances = [0];
+
+  if (step > 0) {
+    const inner = Math.min(radius, 3 * storm.sigmaMeters);
+    for (let distance = step; distance < inner; distance += step) {
+      distances.push(distance);
+    }
+  }
+
+  // The field stops drawing below the first legend stop, so a wide cell
+  // ends in a hard edge well inside its rain radius. Straddle it with two
+  // stops or the gradient fades gently through it, which the grid's own
+  // image does not do.
+  const fade = fadeDistance(storm);
+  if (fade !== null) {
+    distances.push(fade, fade * (1 + 1e-6));
+  }
+
+  const last = distances[distances.length - 1];
+  for (let k = 1; k <= 4; k += 1) {
+    const distance = last + (k / 4) * (radius - last);
+    if (distance > last) {
+      distances.push(distance);
+    }
+  }
+
+  return distances;
+}
+
+/**
+ * How far out the storm is still painted at all, or null when it is painted
+ * right out to its rain radius. Found by bisection on the model's own two
+ * functions, rather than repeating the threshold they share.
+ */
+function fadeDistance(storm) {
+  const alphaAt = (distance) => intensityAlpha(stormIntensityAt(storm, storm.x + distance, storm.y));
+  let visible = 0;
+  let blank = storm.rainRadiusMeters;
+  if (alphaAt(blank * (1 - 1e-9)) > 0 || alphaAt(0) <= 0) {
+    return null;
+  }
+  for (let iteration = 0; iteration < 24; iteration += 1) {
+    const middle = (visible + blank) / 2;
+    if (alphaAt(middle) > 0) {
+      visible = middle;
+    } else {
+      blank = middle;
+    }
+  }
+  return visible;
+}
 
 const RainfallField = L.Layer.extend({
-  initialize(grid) {
+  /**
+   * @param grid         the rainfall grid, whose image covers the study box
+   * @param stormSystem  the live storms, for painting past the box's edge
+   */
+  initialize(grid, stormSystem = null) {
     this._grid = grid;
+    this._stormSystem = stormSystem;
   },
 
   onAdd(map) {
@@ -62,24 +134,151 @@ const RainfallField = L.Layer.extend({
     this._draw();
   },
 
+  /** Repaint from the storms as they now stand, without new cell values. */
+  redraw() {
+    if (this._map) {
+      this._draw();
+    }
+  },
+
   _draw() {
     const { bounds } = this._grid;
     const northWest = this._map.latLngToContainerPoint([bounds.north, bounds.west]);
     const southEast = this._map.latLngToContainerPoint([bounds.south, bounds.east]);
+    const context = this._context;
+    const storms = this._stormSystem?.storms;
+    // One boundary for both halves of the picture: the storms are painted
+    // outside it and the grid's image inside it, so every pixel is painted
+    // exactly once - no seam, and no doubled colour.
+    const join = storms?.length ? this._joinRect(northWest, southEast) : null;
 
-    this._context.clearRect(0, 0, this._canvas.width, this._canvas.height);
-    this._context.drawImage(
+    context.clearRect(0, 0, this._canvas.width, this._canvas.height);
+    if (storms?.length) {
+      this._drawStormsBeyondGrid(join);
+    }
+
+    context.save();
+    if (join) {
+      context.beginPath();
+      context.rect(join.left, join.top, join.width, join.height);
+      context.clip();
+    }
+    context.drawImage(
       this._buffer,
       northWest.x,
       northWest.y,
       southEast.x - northWest.x,
       southEast.y - northWest.y
     );
+    context.restore();
+  },
+
+  /**
+   * Where the painted grid ends and the painted storms begin: the grid's
+   * rectangle inset by half a cell.
+   *
+   * The image is sampled at cell centres, so its outer half-cell is a flat
+   * clamp of the first one. Meeting the gradient's true value there showed
+   * as a hairline step along the edge of the box; the join is moved in to
+   * the first row of cell centres instead, where the two agree. Null when
+   * the whole box is smaller than a cell on screen.
+   */
+  _joinRect(northWest, southEast) {
+    const insetX = (southEast.x - northWest.x) / (2 * this._grid.columns);
+    const insetY = (southEast.y - northWest.y) / (2 * this._grid.rows);
+    // Rounded to whole pixels: the two clips share this boundary, and on a
+    // fractional one they would each anti-alias to partial coverage of the
+    // same pixel - a one-pixel dark line down the join.
+    const left = Math.round(northWest.x + insetX);
+    const top = Math.round(northWest.y + insetY);
+    const right = Math.round(southEast.x - insetX);
+    const bottom = Math.round(southEast.y - insetY);
+    if (!(right > left) || !(bottom > top)) {
+      return null;
+    }
+    return { left, top, width: right - left, height: bottom - top };
+  },
+
+  /**
+   * The storms, painted past the edge of the grid.
+   *
+   * The grid's image stops at the study box, so a cell dragged outside it
+   * lost its heatmap and read as a flat disc - exactly where you most want
+   * to see what the cell is, since its rain is not being simulated out there
+   * either. Each storm is a Gaussian about its centre, which on screen is a
+   * radial gradient: the stops are the field's own colours read at I(d), so
+   * the falloff looks the same on both sides of the edge.
+   *
+   * The one thing it cannot carry is the grid's noise texture, so a cell
+   * straddling the edge while it runs is speckled inside and smooth outside,
+   * by up to the noise amplitude. That reads as what it is: out there the
+   * storm is drawn, not simulated.
+   */
+  _drawStormsBeyondGrid(join) {
+    const context = this._context;
+    context.save();
+    // Everything outside the join (even-odd): inside it the simulated field
+    // is the truth, and painting both would double the colour.
+    context.beginPath();
+    context.rect(0, 0, this._canvas.width, this._canvas.height);
+    if (join) {
+      context.rect(join.left, join.top, join.width, join.height);
+    }
+    context.clip('evenodd');
+
+    for (const storm of this._stormSystem.storms) {
+      this._paintStorm(storm);
+    }
+
+    context.restore();
+  },
+
+  _paintStorm(storm) {
+    const { lat, lng } = this._grid.toLatLng(storm.x, storm.y);
+    const centre = this._map.latLngToContainerPoint([lat, lng]);
+    // The rain radius in pixels, measured the way Leaflet sizes a circle:
+    // due east of the centre at this latitude.
+    const metersPerDegreeLng = 111320 * Math.cos((lat * Math.PI) / 180);
+    const edge = this._map.latLngToContainerPoint([
+      lat,
+      lng + storm.rainRadiusMeters / metersPerDegreeLng
+    ]);
+    const radius = Math.abs(edge.x - centre.x);
+    if (!(radius > 0.5)) {
+      return;
+    }
+
+    // Nothing to paint when the cell is nowhere near the viewport.
+    if (
+      centre.x + radius < 0 ||
+      centre.y + radius < 0 ||
+      centre.x - radius > this._canvas.width ||
+      centre.y - radius > this._canvas.height
+    ) {
+      return;
+    }
+
+    const context = this._context;
+    const gradient = context.createRadialGradient(centre.x, centre.y, 0, centre.x, centre.y, radius);
+    for (const distance of gradientDistances(storm)) {
+      // Sampled through the model's own intensity function, so the picture
+      // cannot drift from what the storm would actually drop.
+      const value = stormIntensityAt(storm, storm.x + distance, storm.y);
+      gradient.addColorStop(
+        Math.min(1, distance / storm.rainRadiusMeters),
+        intensityCss(value)
+      );
+    }
+
+    context.fillStyle = gradient;
+    context.beginPath();
+    context.arc(centre.x, centre.y, radius, 0, Math.PI * 2);
+    context.fill();
   }
 });
 
-export function createRainfallField(grid) {
-  return new RainfallField(grid);
+export function createRainfallField(grid, stormSystem = null) {
+  return new RainfallField(grid, stormSystem);
 }
 
 // Storm handles: the editable part. Each storm gets a dashed cloud ring, a
@@ -112,9 +311,9 @@ export function createStormTrackLayer({ grid, stormSystem, onChange }) {
   const GHOSTS = [1 / 3, 2 / 3, 1];
   // A ghost is drawn as rings at these multiples of sigma (and at the rain
   // edge), each a little more opaque than the one outside it. A single flat
-  // disc said where the cell would be but nothing about the shape of it -
-  // and out beyond the rain grid, where the field cannot be painted, the
-  // rings are the only thing that shows the falloff at all.
+  // disc said where the cell would be but nothing about the shape of it;
+  // these are the falloff read as bands, at a time the field cannot paint
+  // because it has not happened yet.
   const GHOST_RINGS = [
     { sigmas: Infinity, alpha: 0.05 },
     { sigmas: 2, alpha: 0.07 },
@@ -131,17 +330,39 @@ export function createStormTrackLayer({ grid, stormSystem, onChange }) {
   // Nothing is drawn beyond this box. A cell drifting at 9 m/s is 1,300 km
   // away after a two-day forecast span, and a polyline that long - with a
   // ghost of a 14 km rain area on the end of it - is real work for Leaflet
-  // on every redraw, for a storm nobody can see. The track is clipped to the
-  // study area with a margin, so what is drawn is always about a screen's
-  // worth of it.
+  // on every redraw, for a storm nobody can see.
+  //
+  // The box is what can be SEEN, not the study area: clipping to the study
+  // area meant a storm placed or blown outside it lost its track, its ghosts
+  // and the tip you aim it by, while its own centre and rings stayed on
+  // screen. Padding the view keeps a screen's worth of line either way, and
+  // it is recomputed whenever the map moves.
   const worldWidth = grid.columns * grid.cellWidthMeters;
   const worldHeight = grid.rows * grid.cellHeightMeters;
-  const box = {
+  const STUDY_BOX = {
     minX: -0.25 * worldWidth,
     maxX: 1.25 * worldWidth,
     minY: -0.25 * worldHeight,
     maxY: 1.25 * worldHeight
   };
+  let box = STUDY_BOX;
+
+  /** The padded map view in local metres; the study box until the map has one. */
+  function viewBox() {
+    const map = layer._map;
+    if (!map) {
+      return STUDY_BOX;
+    }
+    const view = map.getBounds().pad(0.35);
+    const southWest = grid.toLocal(view.getSouth(), view.getWest());
+    const northEast = grid.toLocal(view.getNorth(), view.getEast());
+    return {
+      minX: southWest.x,
+      maxX: northEast.x,
+      minY: southWest.y,
+      maxY: northEast.y
+    };
+  }
 
   function localAt(storm, seconds) {
     return {
@@ -366,6 +587,7 @@ export function createStormTrackLayer({ grid, stormSystem, onChange }) {
   }
 
   function update() {
+    box = viewBox();
     shapes.clearLayers();
     // The handles are left alone mid-drag; the lines and ghosts still follow
     // the pointer, which is the feedback that makes aiming work.
@@ -376,6 +598,16 @@ export function createStormTrackLayer({ grid, stormSystem, onChange }) {
       drawStorm(storm);
     }
   }
+
+  // What is drawn depends on where the map is looking, so panning and
+  // zooming redraw it: a track scrolled into view has to appear.
+  layer.on('add', () => {
+    layer._map.on('moveend zoomend', update);
+    update();
+  });
+  layer.on('remove', () => {
+    layer._map?.off('moveend zoomend', update);
+  });
 
   return {
     layer,
@@ -432,36 +664,8 @@ export function createStormHandles({ grid, stormSystem, onChange, onSelect }) {
     return L.latLng(lat, lng);
   }
 
-  // The rain field is painted on a canvas the size of the rain grid, so a
-  // cell dragged out past the study area loses its heatmap and reads as a
-  // flat disc - exactly where you most want to see what it is, because its
-  // rain is not being simulated either. These rings stand in for the field
-  // out there: the same bands of sigma the track's ghosts use.
-  const SIGMA_RINGS = [
-    { sigmas: 2, alpha: 0.07 },
-    { sigmas: 1, alpha: 0.1 },
-    { sigmas: 0.5, alpha: 0.12 }
-  ];
-
-  /** True while the rain grid covers this storm's centre and can paint it. */
-  function fieldCovers(storm) {
-    const { lat, lng } = grid.toLatLng(storm.x, storm.y);
-    return grid.indexAt(lat, lng) >= 0;
-  }
-
   function build(storm) {
     const centre = positionOf(storm);
-
-    // Under everything else, so the rain outline and the handles stay on top.
-    const rings = SIGMA_RINGS.map((ring) =>
-      L.circle(centre, {
-        radius: Math.min(storm.rainRadiusMeters, ring.sigmas * storm.sigmaMeters),
-        stroke: false,
-        fillColor: '#2563eb',
-        fillOpacity: 0,
-        interactive: false
-      })
-    );
 
     const cloud = L.circle(centre, {
       radius: storm.cloudRadiusMeters,
@@ -504,13 +708,26 @@ export function createStormHandles({ grid, stormSystem, onChange, onSelect }) {
       onChange?.(storm);
     });
 
-    // Dragging the grip sets the rain radius from its distance to the centre;
-    // the cloud keeps its proportion so it stays the larger of the two.
+    // Dragging the grip scales the whole cell, not just its outline: the rain
+    // radius follows the pointer, and sigma and the cloud keep their
+    // proportions to it.
+    //
+    // Sigma is what says how far the rain actually reaches - past about three
+    // of them the Gaussian is under the lightest colour on the scale - so
+    // stretching the outline alone turned a big cell into a small core of
+    // rain sitting in a wide empty ring, with no way to fill it from the
+    // ring itself.
     grip.on('drag', () => {
-      const ratio = storm.cloudRadiusMeters / storm.rainRadiusMeters;
+      const previous = storm.rainRadiusMeters;
+      const cloudRatio = previous > 0 ? storm.cloudRadiusMeters / previous : 5 / 3;
+      const sigmaRatio = previous > 0 ? storm.sigmaMeters / previous : 1 / 3;
       const distance = positionOf(storm).distanceTo(grip.getLatLng());
-      storm.rainRadiusMeters = Math.max(200, distance);
-      storm.cloudRadiusMeters = storm.rainRadiusMeters * Math.max(1.05, ratio);
+      storm.rainRadiusMeters = clampStorm('rainRadiusMeters', distance);
+      storm.sigmaMeters = clampStorm('sigmaMeters', storm.rainRadiusMeters * sigmaRatio);
+      storm.cloudRadiusMeters = clampStorm(
+        'cloudRadiusMeters',
+        storm.rainRadiusMeters * Math.max(1.05, cloudRatio)
+      );
       sync(storm);
       onChange?.(storm);
     });
@@ -520,11 +737,8 @@ export function createStormHandles({ grid, stormSystem, onChange, onSelect }) {
       onSelect?.(storm.id);
     });
 
-    const handles = { rings, cloud, rain, centreMarker, grip };
+    const handles = { cloud, rain, centreMarker, grip };
     handlesByStorm.set(storm.id, handles);
-    for (const ring of rings) {
-      layer.addLayer(ring);
-    }
     layer.addLayer(cloud).addLayer(rain).addLayer(centreMarker).addLayer(grip);
     return handles;
   }
@@ -538,22 +752,6 @@ export function createStormHandles({ grid, stormSystem, onChange, onSelect }) {
     const centre = positionOf(storm);
     handles.cloud.setLatLng(centre).setRadius(storm.cloudRadiusMeters);
     handles.rain.setLatLng(centre).setRadius(storm.rainRadiusMeters);
-
-    // The rings only show where the field cannot: inside the grid they would
-    // be a blue haze over the heatmap that is already there.
-    const painted = fieldCovers(storm);
-    let previous = Infinity;
-    handles.rings.forEach((ring, index) => {
-      const radius = Math.min(storm.rainRadiusMeters, SIGMA_RINGS[index].sigmas * storm.sigmaMeters);
-      const shown = !painted && radius > 0 && radius < previous;
-      if (radius > 0) {
-        ring.setLatLng(centre).setRadius(radius);
-      }
-      ring.setStyle({ fillOpacity: shown ? SIGMA_RINGS[index].alpha : 0 });
-      if (shown) {
-        previous = radius;
-      }
-    });
 
     if (!handles.centreMarker.dragging?._draggable?._moving) {
       handles.centreMarker.setLatLng(centre);

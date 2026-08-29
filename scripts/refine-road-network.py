@@ -430,7 +430,11 @@ def main():
     shore = np.abs(np.concatenate([cz, fz])) < 1e-6
     shore_x = np.concatenate([cx, fx])[shore]
     shore_y = np.concatenate([cy, fy])[shore]
-    coastal = np.zeros(len(node_x), dtype=bool)
+    # How far each junction is from it, not just whether it is near: a street
+    # AT the water's edge spills into the sea whatever else it connects to,
+    # while one a couple of hundred metres inland has to get there first, and
+    # the two cannot be told apart by a flag.
+    shore_m = np.full(len(node_x), np.inf)
     if len(shore_x):
         cell = COASTAL_M
         buckets = {}
@@ -439,21 +443,89 @@ def main():
         for n in range(len(node_x)):
             bx0 = int(node_x[n] // cell)
             by0 = int(node_y[n] // cell)
+            best = np.inf
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
                     picks = buckets.get((bx0 + dx, by0 + dy))
                     if not picks:
                         continue
                     index = np.fromiter(picks, dtype=np.int64)
-                    if np.min(np.hypot(shore_x[index] - node_x[n], shore_y[index] - node_y[n])) <= COASTAL_M:
-                        coastal[n] = True
-                        break
-                if coastal[n]:
-                    break
+                    near = np.min(np.hypot(shore_x[index] - node_x[n], shore_y[index] - node_y[n]))
+                    if near < best:
+                        best = near
+            shore_m[n] = best
+    coastal = shore_m <= COASTAL_M
     print(
         f'  {len(shore_x):,} shoreline vertices; {int(coastal.sum()):,} junctions within '
         f'{COASTAL_M:.0f} m of the shore'
     )
+    low = elev <= 1.5
+    for reach in (20, 40, 60, 100, 250):
+        near = shore_m <= reach
+        print(f'    within {reach:>3} m: {int(near.sum()):>6,} junctions, {int((near & low).sum()):>6,} of them at or below 1.5 m')
+
+    # Where a street meets an open channel. A khlong is the third way water
+    # leaves a street - after the grates and the ground - and the one the
+    # city's own flood plan routes its water masses down. The pipe model
+    # already discharges into them; the streets could not, so runoff that
+    # reached a canal bank had to wait for a grate.
+    print('Reading waterways and water bodies...')
+    water_m = np.full(len(node_x), np.inf)
+    wlng, wlat = [], []
+
+    def collect(coords):
+        """Every [lng, lat] in a geometry, whatever its nesting: a canal is a
+        line, a reservoir is a ring, and a street beside either can shed into
+        it."""
+        if not isinstance(coords, list) or not coords:
+            return
+        if isinstance(coords[0], (int, float)) and len(coords) >= 2:
+            wlng.append(coords[0])
+            wlat.append(coords[1])
+            return
+        for part in coords:
+            collect(part)
+
+    open_water = 0
+    for name in ('chonburi-rivers.geojson', 'chonburi-water-bodies.geojson'):
+        path = ROOT / 'public' / 'data' / name
+        if not path.exists():
+            print(f'  {name} missing - run `npm run fetch:rivers` / `fetch:water`')
+            continue
+        before = len(wlng)
+        for feature in json.loads(path.read_text(encoding='utf-8')).get('features', []):
+            collect((feature.get('geometry') or {}).get('coordinates'))
+        print(f'  {name}: {len(wlng) - before:,} vertices')
+        open_water += 1
+
+    if True:
+        if wlng:
+            wx, wy = TO_UTM.transform(np.asarray(wlng), np.asarray(wlat))
+            wx = np.asarray(wx)
+            wy = np.asarray(wy)
+            cell = 250.0
+            buckets = {}
+            for index in range(len(wx)):
+                buckets.setdefault((int(wx[index] // cell), int(wy[index] // cell)), []).append(index)
+            for n in range(len(node_x)):
+                bx0 = int(node_x[n] // cell)
+                by0 = int(node_y[n] // cell)
+                best = np.inf
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        picks = buckets.get((bx0 + dx, by0 + dy))
+                        if not picks:
+                            continue
+                        index = np.fromiter(picks, dtype=np.int64)
+                        near = np.min(np.hypot(wx[index] - node_x[n], wy[index] - node_y[n]))
+                        if near < best:
+                            best = near
+                water_m[n] = best
+            print(f'  {len(wx):,} open-water vertices in all')
+            for reach in (20, 40, 60, 100):
+                print(f'    within {reach:>3} m: {int((water_m <= reach).sum()):>6,} junctions')
+        else:
+            print('  no open water found; streets keep no canal outfalls')
 
     print('Reading road widths...')
     width, matched = nearest_width(node_x, node_y)
@@ -469,6 +541,12 @@ def main():
     network['width'] = [round(float(v), 1) if np.isfinite(v) else 0 for v in width]
     network['elevSource'] = [int(v) for v in covered]  # 1 = surveyed surface, 0 = de-biased COP30
     network['coastal'] = [int(v) for v in coastal]
+    # Metres to the shoreline, -1 beyond the search radius. What decides
+    # which streets can spill straight into the sea.
+    network['shoreM'] = [round(float(v), 1) if np.isfinite(v) and v <= COASTAL_M else -1 for v in shore_m]
+    # Metres to the nearest open channel, -1 beyond the search radius: which
+    # streets can shed into a khlong.
+    network['waterM'] = [round(float(v), 1) if np.isfinite(v) and v <= COASTAL_M else -1 for v in water_m]
     network['source'] = (
         'OpenStreetMap streets (ODbL); heights from Pattaya City contour2m, shifted to the '
         'benchmark datum (COP30 de-biased outside the survey); carriageway widths from roadcl_arc'

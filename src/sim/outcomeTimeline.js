@@ -165,8 +165,8 @@ export function createOutcomeTimeline({
             pipes?.setSeaLevel(level);
           }
           grid.step(stormsAt(next), stepSeconds, noise);
+          // The streets step the drains inside their own substeps.
           streets.step(intensityAt, stepSeconds);
-          pipes?.step(stepSeconds);
           t = next;
         }
         snapshots.push(snapshotNow());

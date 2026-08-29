@@ -121,7 +121,12 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
     fullAreaM2[c] = sectionOf(shape[c], widthM[c], heightM[c], heightM[c]).area;
     minLength = Math.min(minLength, lengthM[c]);
   }
-  minLength = Math.max(10, Number.isFinite(minLength) ? minLength : 10);
+  // The length the substep rule keeps the fastest water inside. Floored at
+  // 20 m: shorter conduits are the joins the build could not merge, hold
+  // next to nothing, and are protected by the transfer limiter anyway - and
+  // the streets now step the drains inside their own 15 s substeps, where a
+  // floor of 10 m asked for twice the substeps for no change in the answer.
+  minLength = Math.max(20, Number.isFinite(minLength) ? minLength : 20);
 
   // --- stage-storage per junction --------------------------------------------
   //

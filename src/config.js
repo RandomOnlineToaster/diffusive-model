@@ -113,6 +113,21 @@ export const config = {
   // height is taken to meet the sea, and drains against the tide; higher
   // ones discharge freely off the edge of the map.
   seaOutfallMaxElevM: readNumber(env.VITE_SEA_OUTFALL_MAX_ELEV_M, 1.5, { min: 0, max: 20 }),
+  // A junction this close to the shoreline meets the sea whatever else its
+  // street connects to: water standing at the water's edge runs off the edge,
+  // it does not follow the road along the coast looking for a dead end. The
+  // surveyed shoreline is sampled about every 13 m, so 60 m reaches the
+  // beachfront carriageway without reaching the block behind it (180
+  // junctions at 60 m, 1,263 at 100 m).
+  seaOutfallShoreM: readNumber(env.VITE_SEA_OUTFALL_SHORE_M, 60, { min: 0, max: 250 }),
+  // A junction this close to OPEN WATER - a khlong, a river, a lake, a
+  // reservoir - sheds into it. That is the third way water leaves a street,
+  // after the grates and the ground, and the one the city's flood plan
+  // routes its water masses down; without it, runoff that had already run
+  // downhill to a bank still had to wait for a grate. The same 40 m the
+  // drainage model uses for its own canal outfalls (7,479 junctions; 12,766
+  // at 60 m). 0 turns street open-water outfalls off.
+  canalOutfallM: readNumber(env.VITE_CANAL_OUTFALL_M, 40, { min: 0, max: 250 }),
   // Depressions in the street DEM shallower than this are filled before the
   // water model runs. COP30 resolves height to metres, so a shallower bowl is
   // sampling noise - and a pit traps water that can only leave by the drain,
@@ -255,6 +270,17 @@ export const config = {
   // Spatial variation applied after the Gaussian, so the Gaussian stays
   // dominant. 0.15 is +/-15%; 0 disables it.
   rainNoiseAmplitude: readNumber(env.VITE_RAIN_NOISE, 0.15, { min: 0, max: 0.5 }),
+  // How far back the water is run for a moment picked on the forecast bar:
+  // from dry ground this many hours before it. A rain event is over in a few
+  // hours and the streets clear in minutes, so earlier rain does not change
+  // the picture, and the cost of any pick is bounded by this.
+  //
+  // 0 turns the water off for a forecast span altogether: the rain is drawn
+  // and routed along the streets as it was before the models were wired to
+  // it, which costs nothing. The ceiling is a week, the length of the
+  // forecast itself - honest, but a whole week of water is tens of minutes
+  // of computing for one pick.
+  forecastWaterWindowHours: readNumber(env.VITE_FORECAST_WATER_WINDOW_H, 3, { min: 0, max: 168 }),
   // How fast surface water drains away, as an exponential time constant in
   // simulated seconds. 900 s means roughly 10 minutes to half-drain.
   rainDrainTauSeconds: readNumber(env.VITE_RAIN_DRAIN_TAU_S, 900, { min: 60, max: 86400 }),

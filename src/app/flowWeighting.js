@@ -126,16 +126,17 @@ export function createFlowWeighting({ map, rainfall, roadFlow, grid, layers, sta
   }
 
   /**
-   * Street Flow in the current mode: under forecast rain that water routed
-   * along the streets (the way Flow Paths are re-weighted), under a storm the
-   * live ponding model, otherwise the terrain baseline.
+   * Street Flow in the current mode: the live water model while it is
+   * raining - forecast or placed storm alike, since both step the same
+   * streets - the forecast's runoff routed at steady state when a span is
+   * running with its water off, and the terrain baseline otherwise.
    */
   function refreshStreets() {
     if (!roadFlow.refresh || !map.hasLayer(roadFlow.layer)) {
       return;
     }
 
-    if (state.isForecastActive()) {
+    if (state.isForecastRouted?.()) {
       roadFlow.refresh((lat, lng) => rainfall.depthAt(lat, lng));
     } else if (state.isRainActive()) {
       roadFlow.dynamic?.render();

@@ -67,7 +67,7 @@ can replace an assumption without touching the maths. The formulas live in
 | Outfalls | A run end within 250 m of the coast is a **sea outfall** whose receiving level is the live sea level; one within 40 m of an OSM waterway is a canal outfall (free); a network with neither gets its lowest dead end as an outfall | Open outfalls: the tide flows back in (`VITE_OUTFALL_FLAP_VALVE`) |
 | Pumps | 63 of the 65 stations (64 surveyed, Khao Noi placed from the city plan) sit on the graph; each pumps its sump out above a start depth until a stop depth | The 9 stations the city plan names run at its rated flows (0.99-10 m³/s); the rest 1 m³/s (`VITE_PUMP_RATED_M3S`) - the survey records names only |
 | Sea level | Open-Meteo Marine hourly sea level (tide + surge), read a little offshore at the moment on the scenario's clock; a synthetic harmonic tide when offline; a **surge slider** adds metres on top | COP30 heights ~ metres above MSL |
-| Streets | A street dead end **on the shore** (within 250 m of the zero-metre contour) and at or below 1.5 m meets the sea and drains against it - or takes it in when drowned; other dead ends discharge freely. Inside the surveyed area the inlets are the only way down; outside it the generic `VITE_STREET_DRAIN_MM_H` term stands in | 850 of them; the shoreline comes from the contours, the threshold is still a setting |
+| Streets | Two ways to meet the sea: a junction **on the shore itself** (within `VITE_SEA_OUTFALL_SHORE_M`, 60 m, of the surveyed zero-metre contour) spills into it whatever else its street connects to, and a low dead end within 250 m of the shore drains against it as before - or takes it in when drowned. A junction within `VITE_CANAL_OUTFALL_M` (40 m) of **open water** - a khlong, river, lake or reservoir - sheds into it over the bank, wherever it is on the network (7,479 junctions). Other dead ends discharge freely. Inside the surveyed area the inlets are the only way down; outside it the generic `VITE_STREET_DRAIN_MM_H` term stands in | 851 of them. Water at the water's edge has to leave by the edge, not by following the beach road to a dead end: of the 2,073 low junctions within 250 m of the shore, 1,967 are through junctions. In the event only one of the 180 within 60 m was not already a dead end, so the rule is now right rather than accidentally right |
 | Infiltration | The pervious share of wet ground (5 % of a street patch, 35 % of the flood strip past the kerb) soaks on Horton's curve, 60 -> 12 mm/h | Sandy loam everywhere |
 | Wind | Open-Meteo hourly wind; a new storm cell drifts at 0.75 x the 850 hPa wind (or 1.5 x the 10 m wind when no wind aloft is served); surface wind, gusts and pressure show in the panel | |
 | Ensemble | **Run ensemble** replays the placed storms N times from dry ground with jittered track, speed, bearing, size and intensity (seeded, so repeatable), records each street's peak depth, and paints the share of runs deeper than 5 cm | 8 members x 3 h at 5-minute steps, about 30 s |
@@ -83,23 +83,134 @@ model reads its ground from the same array, so both improved together. What
 remains is vertical detail: a 2 m contour interval settles where water goes
 but not the 10-30 cm dips that set how deep it stands.
 
-## Requirements
+## Installing
 
-- Node 18+
-- Python 3 with `numpy` and `tifffile` (only for the DEM/road build steps)
-- A free [OpenTopography](https://opentopography.org/) API key (only to
-  re-download the DEM)
+### Requirements
 
-## Setup
+| | |
+| --- | --- |
+| **Node** | 18 or newer (developed on 25). `npm` comes with it |
+| **Browser** | any current Chromium or Firefox |
+| **Disk** | ~50 MB of committed data, plus ~200 MB of `node_modules` |
+| **Memory** | the street model holds 266,305 junctions in typed arrays; 4 GB of RAM is comfortable, 8 GB if you run long forecast spans |
+| **GPU** | not used. Everything runs on the CPU in one browser tab |
+| **Python** | 3.9+ **only if you rebuild the datasets** (see below): `numpy`, `tifffile`, `pyogrio`, `shapely`, `pyproj` |
+
+### Run it
 
 ```bash
+git clone https://github.com/RandomOnlineToaster/water-map.git
+cd water-map
 npm install
-cp .env.example .env.local     # then set OPENTOPOGRAPHY_API_KEY
-npm run dev
+cp .env.example .env.local
+npm run dev                 # http://localhost:5173
 ```
 
-The derived data the app reads at runtime is committed, so it runs straight
-after a clone — no API key needed unless you want to rebuild the DEM.
+That is the whole install. Every dataset the browser reads is committed, so
+the map works immediately after a clone — no API key, no Python, no build
+step. The keys below only unlock extra layers or let you rebuild the data.
+
+### Configuration
+
+Settings live in `.env.local` (git-ignored); `.env.example` documents every
+one of them with its default and why it is that. Nothing is required.
+
+| setting | unlocks | without it |
+| --- | --- | --- |
+| `VITE_CARTO_KEY` | CARTO Positron as the *Light* basemap, sharp to zoom 20 | Esri Light Gray stands in automatically (keyless, tiles to zoom 16) |
+| `VITE_TMD_TOKEN` | TMD's 2 km grid forecast | that layer reads *no token*; Open-Meteo still works, keyless |
+| `VITE_TMD_UID` + `VITE_TMD_UKEY` | TMD's rain gauges | the gauge layer reads *unavailable* |
+| `OPENTOPOGRAPHY_API_KEY` | `npm run fetch:dem` only | not needed - the derived DEM cache is committed |
+
+Open-Meteo (rain forecast, tide, wind) and JAXA GSMaP (cloud) need no key.
+
+**On a modest machine**, three settings buy back most of the cost:
+
+```ini
+VITE_FORECAST_WATER_WINDOW_H=0   # 0 = forecast spans draw rain only (instant); 1-3 = run the water
+VITE_RAIN_GRID_SIZE=240          # 400 is sharper and about 3x the work
+VITE_FLOW_PARTICLES=false        # static arrows instead of animated trails
+```
+
+### What is committed, and what is not
+
+Committed (~52 MB) — the derived data the app reads:
+
+| file | |
+| --- | --- |
+| `chonburi-road-network.json` | 14.3 MB - 266k junctions with surveyed heights, widths, shore and open-water distances |
+| `drainage-covers.geojson` | 19.3 MB - 80k manhole and inlet covers |
+| `chonburi-roads.geojson`, `chonburi-rivers.geojson`, `chonburi-water-bodies.geojson` | the OSM sources |
+| `drainage-model.json` | 1.6 MB - the pipe graph the simulation runs on |
+| `drainage-pipes/-depths/-sumps/-pumps.geojson` | the surveyed drainage layers |
+| `chonburi-dem-cache.json` | 2.8 MB - the browser's DEM |
+
+Not committed, and not needed to run: the raw DEM (`chonburi-dem.asc`, ~210 MB,
+past GitHub's file limit and reproducible), the city's GIS geodatabase
+(`Data_Pattaya.gdb`, not ours to redistribute) and the sensor archives.
+
+### Rebuilding the datasets
+
+Only if you have the sources and want to change how they are processed. Run
+them in this order - later steps read what earlier ones write.
+
+| command | needs | writes |
+| --- | --- | --- |
+| `npm run fetch:dem` | OpenTopography key | `chonburi-dem.asc` / `.tif` |
+| `npm run build:dem-cache` | the `.asc` | `chonburi-dem-cache.json` |
+| `npm run fetch:roads` | Overpass (no key) | `chonburi-roads.geojson` |
+| `npm run fetch:rivers` | Overpass | `chonburi-rivers.geojson` |
+| `npm run fetch:water` | Overpass | water bodies and gates |
+| `npm run build:roads` | roads + DEM | `chonburi-road-network.json` (COP30 heights) |
+| `npm run extract:drainage` | `Data_Pattaya.gdb` | `drainage-pipes/-covers/-pumps/-depths/-sumps.geojson` |
+| `npm run refine:network` | the `.gdb` + rivers + water bodies | rewrites the road network: contour heights on the benchmark datum, carriageway widths, distance to shore and to open water |
+| `npm run build:drainage` | the drainage GeoJSON + road network | `drainage-model.json` |
+| `npm run build:pattaya` | the SMART GIS TSVs in `data/pattaya/` | `pattaya-pipes/-stations.geojson` |
+
+Each script takes the geodatabase path as its first argument if yours is not
+at the default `D:\Code\_SCS\data\1.GIS_Geodatabase\Data_Pattaya.gdb`.
+
+### Tests
+
+```bash
+npm test        # hydraulics against textbook values, the pipe network on a
+                # hand-built case, and the forecast time axis
+```
+
+### Building for production
+
+```bash
+npm run build   # static site in dist/
+npm run preview # serve it locally
+```
+
+One deployment caveat: TMD allows only its own origin in CORS, so `vite.config.js`
+proxies `/tmd` in the dev and preview servers. **A static deploy has no proxy** -
+give your web server a rule mapping `/tmd` to `https://data.tmd.go.th`, or the
+TMD layers will report themselves unavailable (everything else calls its source
+directly and is unaffected).
+
+### Branches
+
+| branch | |
+| --- | --- |
+| `production` | this physics model - the default branch |
+| `development-sm` | the small-model track |
+| `development-lm` | the large-model track |
+
+All three start from the same commit. The physics model runs on the CPU in
+the browser; the model tracks are where anything GPU-side belongs, with this
+branch as the thing to compare against.
+
+### If something looks wrong
+
+| symptom | cause |
+| --- | --- |
+| *Rain Forecast (OM)* orange, *unavailable (429)* | Open-Meteo rate limit. It clears by itself; TMD remembers its `retry-after` so a reload does not spend another request |
+| `geodatabase not found` | the `.gdb` is not in the repo - pass its path as the script's first argument |
+| `AttributeError: _ARRAY_API not found` from pyogrio | harmless NumPy 2 warning from an optional pandas accelerator; the scripts still run |
+| git warns `CRLF will be replaced by LF` | harmless on Windows |
+| the map stalls while a forecast span computes | the water window - see the settings above |
 
 ## Using the map
 
@@ -130,7 +241,7 @@ show their values, and pipes and covers open a survey card when clicked.
    reads `6 h · press Play`, and nothing has run yet.
 
    **Play** goes there: it runs the scenario as far as that hour and no
-   further (about two seconds for five, in 5-minute steps, with the bar
+   further (a few seconds per hour, in 5-minute steps, with the bar
    tinting to show how much has been run), shows the storms, rain field,
    streets, pools and drains as they stand then, and **stops**. The ghosts
    come off - the water they predicted is now on the map - and the bar stays
@@ -179,7 +290,7 @@ runs.
 | Layer | Shows | Notes |
 | --- | --- | --- |
 | **Street Flow** | While it rains: every wet street coloured by standing depth (green 0.5 cm → red 50 cm), with particle trails running the way the water is actually moving. Without rain: the terrain's steepest-descent routes | Hover a street for its depth and flow. **Flow detail** trades chains for speed |
-| **Ponding** | The standing water itself: a blue band along each wet street, as wide as the ground the water has spread to (the street below the kerb, the 60 m catchment strip above it), darker the deeper - so a flooded block reads as a flooded block | Sits under the other layers. Needs real depth - a light shower drains before it ponds; the default 100 mm/h cell over central Pattaya floods within a few minutes |
+| **Ponding** | The standing water itself: a blue band along each wet street, as wide as the ground the water has spread to (the street below the kerb, the 60 m catchment strip above it) and clipped to the land, darker the deeper - so a flooded block reads as a flooded block | Sits under the other layers. Needs real depth - a light shower drains before it ponds; the default 100 mm/h cell over central Pattaya floods within a few minutes |
 | **Flow Direction / Flow Paths** | The 200 m grid's D8 field and channel tree; under rain the tree is lit where rain has recently fallen | Catchment scale, not street scale |
 | **Catchment** | Upstream area (flow accumulation) draining through each grid cell - where flow converges | Not where water stands: that is Ponding |
 | **Drainage Pipes** | The surveyed drain runs, coloured by type and weighted by bore; while it rains, recoloured by how full each run is (blue → red) | Click a run for size, material, length |
@@ -224,9 +335,31 @@ plays from its start, at the speed slider's pace, re-weighting Flow Paths,
 Catchment and Street Flow by the water as it goes. Play pauses and resumes,
 Reset rewinds to the span's first hour, click inside the span to jump to a
 moment, Shift + drag again to move its end, and a plain click outside it
-clears it. Storms placed during a span rain into the same water. (Under a
-forecast span the streets are routed at steady state - ponding, inlets,
-tide and pumps only act on placed storms for now; see *Status*.)
+clears it. Storms placed during a span rain into the same water.
+
+A span keeps two clocks. The **rain** is stateless - what is on screen is a
+function of the span's start, the moment shown and the storms - so scrubbing
+the bar shows any hour at once, as it always did. The **water** runs the same
+physics a placed storm does (the streets, the surveyed drains, the inlets,
+the tide at the outfalls, the pumps), which makes it path-dependent; but a
+rain event is over in a few hours and the streets clear in minutes, so the
+water at a moment is run from dry ground a fixed window before it - **three
+hours** by default (`VITE_FORECAST_WATER_WINDOW_H`, and the cost of a pick
+is roughly proportional to it: 23 s at one hour, 78 s at three, on a laptop,
+for rain falling on the whole province). **0 turns the water off** and gives
+back exactly the old forecast: the rain is drawn and routed along the
+streets, a pick costs 0.4 s, and ponding, the drains and the pumps have
+nothing to show. The ceiling is **168** - a week, the length of the forecast
+itself - which in practice means "from the start of the span", since a
+window is never taken back past it. Pick an hour and the
+rain shows immediately; the streets and drains follow when the water has
+been run through, in the background, with the card saying so. Picking
+another hour inside the window is a restore from a snapshot; playing carries
+the water on continuously from wherever the clock stands. The one thing the
+window cannot know is rain older than itself: under a front longer than
+three hours the streets are still filling, and the standing water reads low
+(a third low after six steady hours) while the drains and the wet area read
+right.
 
 **Cloud Cover** adds JAXA's satellite cloud tops for the latest available
 hour; **Rain Gauges (TMD)** plots the provincial gauges with their 24 h
@@ -269,7 +402,7 @@ src/
   sim/                 the scenario
     rainfallSim.js     the simulator panel and clock, storm placement
     storm.js           a storm cell; rainfallGrid.js the rain field
-    forecastRain.js    a forecast span rained onto the grid
+    forecastRain.js    a forecast span, rained through the same models
     outcomeTimeline.js snapshots every half hour, replayed on demand
     ensemble.js        jittered replays -> flood probability
   terrain/             the ground
@@ -501,8 +634,8 @@ Each step adds `I · dt / 3600` mm to the cell's accumulation. The grid's own
 *surface water* field decays as `ds/dt = I/3600 − s/τ` with τ = 900 s; at a
 steady rate that has the closed form `s(t + dt) = s·e^(−dt/τ) + I·(τ/3600)·(1 −
 e^(−dt/τ))`, which is why a whole forecast hour can be integrated in one call.
-This field only weights the grid flow layers (Flow Paths / Accumulation) and
-forecast Street Flow; the street ponding model takes the rain rate directly.
+This field weights the grid flow layers (Flow Paths / Catchment); the street
+and pipe models take the rain rate itself, forecast and placed storm alike.
 
 **Forecast rain** (`src/sim/forecastRain.js`). Each forecast cell's "mm between T
 and T + 1 h" becomes a steady rate `mm / hours` over that hour, laid onto the
@@ -511,9 +644,37 @@ each rain-grid cell (a forecast cell is one figure for 10-35 km of country;
 reading the nearest cell drew a cliff along every cell edge). Cells the
 lattice lacks drop out and the remaining weights are renormalised. A moving storm laid over it is advanced in slices
 no longer than half its rain radius at its speed (at most 600 slices per span),
-placed at the middle of each slice so its track is even. Scrubbing backwards
-re-rains the span from its start, so what is on screen is a pure function of
-(span start, moment shown, storms).
+placed at the middle of each slice so its track is even.
+
+The span keeps **two clocks**. The rain clock is stateless: scrubbing
+backwards re-rains the grid from the span's start at about 2 ms per forecast
+hour, so what is on screen is a pure function of (span start, moment shown,
+storms) and any moment shows at once. The water clock is not: the street and
+drain models are stepped in five-minute slices, each rained with the field
+composed for that slice (storms placed at its middle, the noise texture on
+the water's own clock), so a forecast reaches the streets, inlets, pipes,
+pumps and tide exactly as a storm does. Rather than run from the span's
+start, the water for a moment is run from dry ground a **window** before it
+(`VITE_FORECAST_WATER_WINDOW_H`, default 3 h; 0 turns the water off, 168 is
+a week and so means the whole span) in the background, a frame's worth at a
+time, snapshotting both models every quarter hour - or further apart on a
+long window, so any window holds at most sixteen of them and costs the same
+memory. A moment inside the window already computed is a restore, and the
+cost of any pick is bounded by the window however long the span. Playing runs the water on
+continuously from wherever its clock stands, at whatever pace the physics
+allows.
+
+What the window costs: for rain shorter than the window, nothing. For rain
+that lasts longer, the streets are still filling, and the standing water
+reads low: six steady hours of 30 mm/h over the study area gives 4.8 M m³ on
+the streets from a three-hour window against 7.3 M m³ from the span's start
+(−35 %), with the water in the drains within 2 % and the wet area the same
+(201,888 against 202,559 junctions). Widen the window when that matters.
+Province-wide rain is the expensive case - the street model's active set has
+no dry ground to skip - so the three-hour window is about a minute of
+computing (52-70 s measured, against 0.3 s to restore a moment inside it and
+0.2 s to show the rain); the water-driven layers are drawn when it arrives,
+since rasterising a flooded network costs more than the physics under it.
 
 ### 3. Water on the streets (`src/hydro/roadFlow.js`)
 
@@ -537,11 +698,36 @@ the ground slope, which is what makes a full downstream street back water up:
     v    = (1/n) · d^(2/3) · √(head / L)        n = 0.015, v ≤ 3 m/s
     ΔV   = min( d · v·dt/L , 0.25 · head ) · 120  [m³]   (never past a quarter of levelling)
 
-A step is split into `min(8, ⌈3·dt/15⌉)` substeps. Each substep is two-phase:
-all transfers are proposed from the frozen state, scaled so no junction sends
-more than it holds, then landed together - order-independent and
-mass-conserving. Films under 0.5 mm do not flow; volumes under 0.012 m³ snap
-to dry (counted, so the balance still closes).
+A step is split into `min(20, ⌈3·dt/15⌉)` substeps, so the fastest water
+cannot cross more than about 15 m of a link at a time. **The rain and the
+inlets are spent per substep too**, not once per step: a five-minute step
+that landed five minutes of rain in one lump, then took it down the grates at
+the depth that lump made, put the flood in fewer and deeper places than the
+same rain arriving while it flowed away - which is why a precomputed hour
+used to read as emptier than the one you watched arrive. Substeps are sized by the 3 m/s ceiling rather than by the water's actual
+speed, and that is deliberate: sizing them by the fastest water actually
+moving was tried twice and fails, because across a whole province something
+is always running at the cap - even under 2 mm/h, where a strip of runoff
+concentrates on a steep street - so the adaptive length never rises. Forcing
+it up with a 15 s floor did make it cheap, and made the coarse answer
+universal: the deepest water read 238 cm where the fine run said 127 cm.
+
+The drains are stepped **inside** the street step too, every simulated
+minute (once per outer step, a manhole that filled in the first substep
+refused its inlet for the rest of the step, and a five-minute step took a
+quarter less down the grates). A sweep from 5 s to 300 s now agrees to
+within a few per cent on how much of the network is wet (5-60 s:
+16,364-16,367 junctions; 300 s: 17,629, with the inlet capture within 5 %),
+and a moving storm reached through the outcome bar puts its water along the
+same thirds of its track as the same storm played through (start/middle/end
+3,477/2,103/2,959 against 3,584/2,067/3,017 wet junctions). A snapshot
+carries each wet junction's Horton clock, so a run continued from one soaks
+at the same rate as one played through.
+
+Each substep is two-phase: all transfers are proposed from the frozen state,
+scaled so no junction sends more than it holds, then landed together -
+order-independent and mass-conserving. Films under 0.5 mm do not flow;
+volumes under 0.012 m³ snap to dry (counted, so the balance still closes).
 
 Water leaves a junction four ways, in this order each step:
 
@@ -561,6 +747,45 @@ Water leaves a junction four ways, in this order each step:
   discharge over a nominal edge of slope `0.0005 + d/20`.
 
 Severity colours are fixed depth stops: 0.5 cm (drawn), 5, 15, 30, 50 cm.
+
+#### Where the water actually goes
+
+Runoff leaves a street three ways - along the road, down a drain, into the
+ground - and all three are modelled. Measured on a 100 mm/h cell over Nong
+Prue, 30 minutes of rain and an hour to drain (785,747 m³):
+
+| | |
+| --- | --- |
+| down the grates, into the surveyed drains | 37 % (with 118,126 m³ pushed back up through surcharged manholes) |
+| the generic drain term, outside the surveyed network | 47 % |
+| into the ground (Horton) | 4 % |
+| out through street outfalls - the sea, a dead end, a khlong | 1 % inland, 7 % in the north where the khlongs are |
+| still standing after an hour | 24 % |
+
+The road part is the routing itself, and it works on the contours: the rain
+fell on ground averaging 27.08 m and the water ended up on ground averaging
+**17.30 m** - it ran 9.78 m downhill - with 6 % of it on junctions the rain
+never touched. What is left standing is where that run ends: **37 % of it
+sits in pits**, junctions with no lower neighbour at all, which is what a
+low point in a street is.
+
+So the model does not depend on the drains alone; but once water has run to
+the bottom, the drains and the ground are the only ways out of a pit, which
+is why a heavy cell still leaves a quarter of itself standing. Adding **open water** as an exit
+(above) moves what reaches it. The same three storms, with the reach at 40 m
+and at 0:
+
+| storm | street outfalls, off | on | standing | wet junctions |
+| --- | --- | --- | --- | --- |
+| by the retention pond | 24,673 m³ | **56,186 m³** (+128 %) | 12 % → 10 % | 1,411 → 1,241 |
+| over the Naklua khlongs | 20,564 m³ | 26,779 m³ (+30 %) | 29 % → 29 % | 2,726 → 2,673 |
+| inland, no open water near | 9,681 m³ | 10,840 m³ | 25 % → 26 % | 3,735 → 3,729 |
+
+So it carries what reaches a bank and nothing where there is no bank to
+reach - which is the honest shape of it. The rest waits on the two things
+still listed below: water bodies that can fill and back up (the retention
+pond holds 100,000 m³, and the plan has khlongs overflowing into each
+other), and runoff tracked off the street graph.
 
 ### 4. Water in the drains (`src/hydro/pipeNetwork.js`, `src/hydro/hydraulics.js`)
 
@@ -632,12 +857,22 @@ projected per junction per step. Nothing in the inner loops allocates: the
 conduit section, the infiltration curve, the inlet capacity and the pump
 rule are all written into reusable records or inlined.
 
-Measured on a storm covering ~13k wet junctions, in a 5-minute step: streets
-49 ms, drains 13 ms, rain grid 0.6 ms, a Street Flow rebuild 34 ms, a
-Ponding repaint 3 ms. An outcome is run only as far as the hour asked for and
-extended from its last snapshot afterwards: five hours takes about two
-seconds, three more about 0.7 s, and restoring an hour already run (one
-snapshot, plus replaying the rain grid to it) 40-140 ms.
+Where an hour goes, measured on province-wide rain (the forecast case, and
+the expensive one - 195k junctions wet, so the active set has nothing to
+skip): about 17 s per simulated hour, of which the street model's own
+substeps are 14 s and the inlets and drains together 3 s. Twenty substeps
+per five-minute step over 195k junctions is simply what the accuracy costs;
+the levers that would cut it - coarser substeps, a shorter water window -
+all trade the agreement between a precomputed hour and a played one that the
+substepping is there to buy. On a storm covering ~16k wet junctions instead:
+about 2.6 s of street and drain models per simulated hour in 5-minute steps, a Street Flow rebuild
+34 ms, a Ponding repaint 3 ms (the sheet is a depth raster once there are
+more than 6,000 bands in view, which is what keeps a city-wide flood pannable
+- stroking them cost 1.8 s of every pan). A forecast hour costs far more
+- 15-40 s, because rain over the whole province leaves the street model's
+active set no dry ground to skip - which is what the water window bounds. An outcome is run only as far as the hour asked for and
+extended from its last snapshot afterwards, and restoring an hour already run
+(one snapshot, plus replaying the rain grid to it) takes 40-140 ms.
 
 ### 8. Where the maps come from
 
@@ -697,11 +932,11 @@ stops above, so a colour always means the same amount of water.
 
 ### What is left to build
 
-- **Forecast rain through the drains.** A forecast span still routes its
-  runoff at steady state (`roadFlow.refresh`); it does not step the ponding
-  and pipe models hour by hour, so tide, inlets and pumps only act on placed
-  storms. The models are ready for it; the span's replay-on-scrub design is
-  what has to change.
+- **A cheaper forecast window.** Running the water through the three hours
+  before a picked moment costs about a minute when the rain covers the whole
+  province, because the street model's active set has no dry ground to
+  skip. Substeps sized by the water's actual speed rather than its ceiling,
+  or the models in a worker, would buy most of it back.
 - **Forecast ensemble.** The ensemble jitters placed storms only. Open-Meteo
   serves ensemble members (`ensemble-api.open-meteo.com`) that could drive the
   same runner from real forecast spread.

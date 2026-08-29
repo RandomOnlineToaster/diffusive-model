@@ -1,31 +1,51 @@
 // Rains a forecast onto the simulator, along a continuous time axis.
 //
-//   forecast grid (hourly cells) -> rain-grid intensity -> surface water
-//                                -> Flow Paths, Flow Accumulation, Street Flow
+//   forecast grid (hourly cells) -> rain-grid intensity -> street water
+//                                -> the drains -> ponding, outfalls, pumps
 //
 // Driven from the forecast timeline: Shift + drag marks a span, and on
 // release the span plays - the clock runs from its start to its end, each
 // forecast hour raining as a steady rate over that hour (the data arrives as
 // "so many mm between T and T + 1 h"), the rain grid integrating it exactly
-// and the flow layers re-weighted by the surface water as it goes.
+// and the street and drain models carrying it as it goes.
 //
 // Storms placed on the map rain into the same water: the forecast's field is
 // the base and each storm is laid over it, so a "what if a cell parks over
 // Pattaya during this front" scenario is one map. A storm rains from the
 // moment it was placed, and its track is anchored there.
 //
-// What is on screen is a function of the span's start, the moment shown and
-// the storms as they now stand, and nothing else: no water is carried in from
-// before the span, and no street ponding is stepped through time (that model
-// drains anything short of a cloudburst before it can move, and showed
-// nothing for a real forecast). So any moment inside the span can be shown on
-// demand: clicking back into hours already played re-rains them from the
-// start, at a couple of milliseconds per forecast hour.
+// Two clocks. The RAIN is stateless: what is on screen is a function of the
+// span's start, the moment shown and the storms, and nothing else, so any
+// moment can be shown on demand - scrubbing re-rains the grid from the span's
+// start at a couple of milliseconds per forecast hour. The WATER is not: a
+// forecast is the realistic input, so it runs the same physics a placed storm
+// does - the streets and the surveyed drains, stepped through time - and the
+// water at a moment exists because of the rain before it. It cannot be looked
+// up, but it need not be run from the span's start either: a rain event is
+// over in a few hours and the streets clear in minutes, so the water at a
+// moment is run from dry ground a fixed window before it (three hours by
+// default). Scrubbing shows the rain at once and the water follows a few
+// seconds later, run through in the background a frame's worth at a time and
+// snapshotted as it goes, so a moment inside the window already computed is
+// a restore rather than a rerun; playing carries the water on continuously
+// from wherever the clock stands.
 
 import { config } from '../config.js';
 import { toLattice } from '../sources/forecast.js';
 
 const HOUR_MS = 3600 * 1000;
+// The hydraulics need short steps to stay stable and conserve mass, so a
+// slice that would rain for longer than this is split.
+const HYDRAULIC_STEP_MS = 300 * 1000;
+// How much computing may be done before handing the frame back, so the page
+// keeps painting while the water is run through the hours before a moment.
+const FRAME_BUDGET_MS = 24;
+// Snapshots of the water models, every so often through the window, so a
+// moment already computed is a restore rather than a rerun. About 0.85 MB
+// each, so a long window takes them further apart rather than more of them:
+// a week costs the same memory as three hours.
+const SNAPSHOT_EVERY_MS = 15 * 60 * 1000;
+const MAX_SNAPSHOTS = 16;
 // The flow layers are rebuilt from the surface water on this cadence while
 // the clock runs or the span is being scrubbed, and once more when it
 // settles: a rebuild costs far more than a frame, and the readouts and the
@@ -45,10 +65,22 @@ const MAX_REPLAY_SLICES = 600;
  * @param playHoursPerSecond  Called every frame for the current playback
  *   rate, in forecast hours per real second, so the simulator's speed slider
  *   scales a span the way it scales the storm clock.
+ * @param streets   the street water model, stepped with the forecast's rain
+ * @param pipes     the drainage network under it, or null
+ * @param seaLevelAt  (unixMs) => metres, the tide the outfalls meet
  */
-export function createForecastRainDriver({ rainfall, playHoursPerSecond, refreshLayers, onState }) {
+export function createForecastRainDriver({
+  rainfall,
+  playHoursPerSecond,
+  refreshLayers,
+  onState,
+  streets = null,
+  pipes = null,
+  seaLevelAt = null
+}) {
   const grid = rainfall.grid;
   const cellCount = grid.columns * grid.rows;
+  const intensityAt = (lat, lng) => rainfall.intensityAt(lat, lng);
 
   let session = null;
   let frameHandle = 0;
@@ -318,8 +350,14 @@ export function createForecastRainDriver({ rainfall, playHoursPerSecond, refresh
     return shortest === Infinity ? Infinity : Math.max(shortest, spanMs / MAX_REPLAY_SLICES);
   }
 
-  /** Rain forward from the moment shown to ms, a slice at a time. */
-  function advanceTo(ms) {
+  // --- the rain clock -------------------------------------------------------
+
+  /**
+   * Rain forward from the moment shown to ms, a slice at a time. The rain
+   * grid alone: this is the picture, and it is cheap enough to redo from the
+   * span's start whenever the moment shown goes backwards.
+   */
+  function advanceRainTo(ms) {
     const sliceMs = sliceMsFor(ms - session.shownMs);
 
     while (session.shownMs < ms) {
@@ -343,40 +381,232 @@ export function createForecastRainDriver({ rainfall, playHoursPerSecond, refresh
       session.shownMs = sliceEnd;
     }
 
-    const bucket = bucketAt(session.shownMs);
+    showRainAt(session.shownMs);
+  }
+
+  /**
+   * The field on screen is the field at the moment shown - not at the middle
+   * of whichever slice ended there, and not wherever the water's clock has
+   * got to: a storm placed at this very moment has to appear now.
+   */
+  function showRainAt(ms) {
+    const bucket = bucketAt(ms);
     if (bucket !== session.bucket) {
       applyBucket(bucket);
     }
-
-    // The field left on screen is the field at the moment shown, not at the
-    // middle of whichever slice ended there: a storm placed at this very
-    // moment has to appear now, not once time moves on. The slices above are
-    // what laid the water down; this is what is being looked at.
-    composeAt(session.shownMs);
+    composeAt(ms);
   }
 
-  /** Re-rain the span from its start up to ms, on dry ground. */
-  function replayTo(ms) {
+  /** The rain grid at ms: onward from here, or again from the span's start. */
+  function rainTo(ms) {
+    if (ms < session.shownMs) {
+      rewindGrid();
+    }
+    advanceRainTo(ms);
+  }
+
+  /** The rain grid back to the span's first hour, with nothing rained yet. */
+  function rewindGrid() {
     grid.reset();
     session.shownMs = session.fromMs;
     session.bucket = -1;
-    advanceTo(ms);
   }
 
-  /** Put the moment ms on screen: onward from here, or again from the start. */
+  // --- the water clock ------------------------------------------------------
+
+  function windowMs() {
+    return config.forecastWaterWindowHours * HOUR_MS;
+  }
+
+  /**
+   * Whether a span runs the water at all. A window of zero says not: the
+   * rain is drawn and routed along the streets, as it was before the models
+   * were wired to a forecast, and nothing is stepped.
+   */
+  function waterEnabled() {
+    return Boolean(streets) && config.forecastWaterWindowHours > 0;
+  }
+
+  /** Far enough apart that a window of any length holds the same few. */
+  function snapshotEveryMs() {
+    return Math.max(SNAPSHOT_EVERY_MS, windowMs() / MAX_SNAPSHOTS);
+  }
+
+  /**
+   * Step the water models from their clock toward `target`, a slice at a
+   * time, each slice rained with the field composed for it. The grid's own
+   * accumulation is left alone - it belongs to the moment shown.
+   *
+   * @param budgetMs  give the frame back after this much computing
+   * @returns whether it reached target
+   */
+  function stepWaterTo(target, budgetMs) {
+    if (!waterEnabled()) {
+      session.waterMs = target;
+      return true;
+    }
+    const sliceMs = sliceMsFor(target - session.waterMs);
+    const started = performance.now();
+
+    while (session.waterMs < target) {
+      const bucket = bucketAt(session.waterMs);
+      if (bucket !== session.bucket) {
+        applyBucket(bucket);
+      }
+      let sliceEnd = Math.min(target, endOfBucket(bucket), session.waterMs + HYDRAULIC_STEP_MS);
+      if (sliceMs < Infinity) {
+        sliceEnd = Math.min(sliceEnd, session.waterMs + sliceMs);
+      }
+      const dtSeconds = (sliceEnd - session.waterMs) / 1000;
+
+      // This slice's rain, storms placed at its middle; the noise texture
+      // drifts on the water's clock, not the display's.
+      grid.compose(placeStormsAt((session.waterMs + sliceEnd) / 2), {
+        noiseAmplitude: config.rainNoiseAmplitude,
+        base: session.base,
+        atSeconds: (sliceEnd - session.fromMs) / 1000
+      });
+      if (seaLevelAt) {
+        const level = seaLevelAt(sliceEnd);
+        streets.setSeaLevel(level);
+        pipes?.setSeaLevel(level);
+      }
+      // The streets step the drains inside their own substeps.
+      streets.step(intensityAt, dtSeconds);
+      session.waterMs = sliceEnd;
+      maybeSnapshot();
+
+      if (performance.now() - started >= budgetMs) {
+        break;
+      }
+    }
+
+    // Whatever the water was just rained with, the screen shows the moment
+    // shown.
+    showRainAt(session.shownMs);
+    return session.waterMs >= target;
+  }
+
+  // Snapshots: what makes a moment already computed cheap to go back to -
+  // the state of both water models, every so often through the window. The
+  // rain grid is not among them; it is re-rained from the span's first hour
+  // on demand.
+
+  function pushSnapshot() {
+    if (!waterEnabled()) {
+      return;
+    }
+    session.snapshots.push({
+      ms: session.waterMs,
+      streets: streets.snapshot(),
+      pipes: pipes ? pipes.snapshot() : null
+    });
+  }
+
+  function maybeSnapshot() {
+    const last = session.snapshots[session.snapshots.length - 1];
+    if (last && session.waterMs - last.ms < snapshotEveryMs()) {
+      return;
+    }
+    pushSnapshot();
+  }
+
+  /** The latest snapshot at or before ms that is no older than the window. */
+  function snapshotFor(ms) {
+    let found = null;
+    for (const snap of session.snapshots) {
+      if (snap.ms > ms + 1) {
+        break;
+      }
+      if (snap.ms >= ms - windowMs()) {
+        found = snap;
+      }
+    }
+    return found;
+  }
+
+  /** Snapshots a window before ms are never needed again. */
+  function pruneSnapshots(ms) {
+    const oldest = ms - windowMs();
+    session.snapshots = session.snapshots.filter((snap) => snap.ms >= oldest);
+  }
+
+  /** The water models dry, with their clock at ms, and that as snapshot zero. */
+  function dryWaterAt(ms) {
+    session.snapshots = [];
+    session.waterMs = ms;
+    // Reset even with the water off, so a span started after one that ran it
+    // does not open on the last one's flood.
+    if (streets) {
+      streets.reset();
+      pipes?.reset();
+    }
+    pushSnapshot();
+  }
+
+  /**
+   * Move the water toward the moment asked for by the shortest road: on from
+   * where its clock stands when that is inside the window, else from the
+   * latest snapshot inside the window, else from dry ground a window before
+   * it. However far away the moment is, the cost is bounded by the window -
+   * which is the point of it.
+   */
+  function catchUpWater(budgetMs = FRAME_BUDGET_MS) {
+    const target = session.waterTargetMs;
+    if (!waterEnabled()) {
+      session.waterMs = target;
+      return true;
+    }
+    const behind = target < session.waterMs;
+    const tooFar = target - session.waterMs > windowMs();
+    if (behind || tooFar) {
+      const snap = snapshotFor(target);
+      if (snap) {
+        streets.restore(snap.streets);
+        if (pipes && snap.pipes) {
+          pipes.restore(snap.pipes);
+        }
+        session.waterMs = snap.ms;
+      } else {
+        dryWaterAt(Math.max(session.fromMs, target - windowMs()));
+      }
+    }
+    const reached = stepWaterTo(target, budgetMs);
+    if (reached) {
+      pruneSnapshots(target);
+    }
+    return reached;
+  }
+
+  /** The water is at the moment shown: paint everything that reads it. */
+  function waterArrived() {
+    rainfall.render();
+    refreshLayersNow({ water: true });
+  }
+
+  /**
+   * Show the moment ms: the rain at once, the water as soon as it has been
+   * run there.
+   */
   function showMoment(ms) {
     const target = Math.max(session.fromMs, Math.min(session.endMs, ms));
-    if (target < session.shownMs) {
-      replayTo(target);
-    } else {
-      advanceTo(target);
-    }
+    rainTo(target);
+    session.waterTargetMs = target;
     rainfall.render();
     layersDirty = true;
+    schedule();
   }
 
-  function refreshLayersNow() {
-    refreshLayers();
+  /** Throw the computed water away and build it again for the moment shown. */
+  function replayTo(ms) {
+    const target = Math.max(session.fromMs, Math.min(session.endMs, ms));
+    rewindGrid();
+    dryWaterAt(Math.max(session.fromMs, target - windowMs()));
+    showMoment(target);
+  }
+
+  function refreshLayersNow({ water = true } = {}) {
+    refreshLayers({ water });
     lastLayerRefresh = performance.now();
     layersDirty = false;
   }
@@ -388,16 +618,29 @@ export function createForecastRainDriver({ rainfall, playHoursPerSecond, refresh
             fromMs: session.fromMs,
             endMs: session.endMs,
             shownMs: session.shownMs,
-            playing: session.playing
+            playing: session.playing,
+            // The water is still being run through the hours before the
+            // moment shown.
+            catchingUp: waterEnabled() && session.waterMs !== session.waterTargetMs,
+            windowHours: config.forecastWaterWindowHours,
+            waterOff: !waterEnabled()
           }
         : null
     );
   }
 
   function schedule() {
-    if (!frameHandle) {
-      frameHandle = requestAnimationFrame(frame);
+    if (frameHandle) {
+      return;
     }
+    // A slice of the water models runs for far longer than a frame, and
+    // inside requestAnimationFrame the browser then paces the next call to
+    // the display's rhythm. A timer keeps no such rhythm, so work that is
+    // already too big for a frame is scheduled on one instead.
+    frameHandle =
+      session && !session.playing && session.waterMs !== session.waterTargetMs
+        ? setTimeout(() => frame(performance.now()), 0)
+        : requestAnimationFrame(frame);
   }
 
   function frame(now) {
@@ -411,10 +654,9 @@ export function createForecastRainDriver({ rainfall, playHoursPerSecond, refresh
       trackStorms();
       // From the start: a storm placed at hour 30 of the span must not leave
       // the hours before it holding water it never rained, and one just
-      // removed must take its water with it.
+      // removed must take its water with it. The water computed for those
+      // hours went with it, so it is run again.
       replayTo(session.shownMs);
-      rainfall.render();
-      layersDirty = true;
     }
 
     if (pendingShow !== null) {
@@ -423,32 +665,56 @@ export function createForecastRainDriver({ rainfall, playHoursPerSecond, refresh
       showMoment(ms);
     }
 
+    let arrived = false;
     if (session.playing) {
-      // Capped, so a tab that was in the background does not leap.
-      const dt = lastFrameAt ? Math.min(0.25, (now - lastFrameAt) / 1000) : 0;
-      lastFrameAt = now;
-      if (dt > 0) {
-        // Read every frame, so moving the speed slider mid-play changes the
-        // pace there and then.
-        const rate = playHoursPerSecond();
-        showMoment(Math.min(session.endMs, session.shownMs + dt * rate * HOUR_MS));
+      if (session.waterMs < session.shownMs) {
+        // Play pressed while the water was still on its way to the moment
+        // shown: it gets there first, then the clock runs.
+        lastFrameAt = now;
+        arrived = catchUpWater();
+      } else {
+        // Capped, so a tab that was in the background does not leap.
+        const dt = lastFrameAt ? Math.min(0.25, (now - lastFrameAt) / 1000) : 0;
+        lastFrameAt = now;
+        if (dt > 0) {
+          // Read every frame, so moving the speed slider mid-play changes
+          // the pace there and then. The clock is the water's: a span whose
+          // water costs more than the rate to compute slows down rather than
+          // running ahead of its own physics.
+          const rate = playHoursPerSecond();
+          session.waterTargetMs = Math.min(session.endMs, session.waterMs + dt * rate * HOUR_MS);
+          catchUpWater();
+          rainTo(session.waterMs);
+          rainfall.render();
+          layersDirty = true;
+        }
+        if (session.shownMs >= session.endMs) {
+          session.playing = false;
+          rainfall.render();
+        }
       }
-      if (session.shownMs >= session.endMs) {
-        session.playing = false;
-        rainfall.render();
-      }
+    } else if (session.waterMs !== session.waterTargetMs) {
+      // Running the water through the hours before the moment shown, a
+      // frame's worth at a time, so the page carries on painting meanwhile.
+      arrived = catchUpWater();
     }
 
-    // While the clock runs or the pointer is still scrubbing, the layers
-    // follow on their cadence; once things settle they catch up at once.
+    // While the clock runs or the pointer is still scrubbing, the rain-driven
+    // layers follow on their cadence; once things settle they catch up at
+    // once. The water-driven layers are drawn only once the water is at the
+    // moment shown: the hours on the way are not being looked at, and a
+    // flooded ponding sheet costs more to draw than the physics under it.
+    const catchingUp = session.waterMs !== session.waterTargetMs;
     const busy = session.playing || now - lastInteraction < SETTLE_MS;
-    if (layersDirty && (!busy || now - lastLayerRefresh >= LAYER_REFRESH_MS)) {
-      refreshLayersNow();
+    if (arrived) {
+      waterArrived();
+    } else if (layersDirty && (!busy || now - lastLayerRefresh >= LAYER_REFRESH_MS)) {
+      refreshLayersNow({ water: !catchingUp });
     }
 
     report();
 
-    if (session.playing || pendingShow !== null || layersDirty || stormsDirty) {
+    if (session.playing || pendingShow !== null || layersDirty || stormsDirty || catchingUp) {
       schedule();
     }
   }
@@ -483,13 +749,21 @@ export function createForecastRainDriver({ rainfall, playHoursPerSecond, refresh
       fromMs: start,
       endMs: start,
       shownMs: start,
-      playing: false
+      playing: false,
+      // The water models' own clock, the moment they are being run toward,
+      // and their snapshots through the window.
+      waterMs: start,
+      waterTargetMs: start,
+      snapshots: []
     };
 
     rainfall.setExternalRain(handle);
+    // clearWater resets the street and drain models through the map's own
+    // onReset, so the span starts on dry ground - and that is snapshot zero.
     rainfall.clearWater();
+    pushSnapshot();
     trackStorms();
-    advanceTo(start);
+    advanceRainTo(start);
     rainfall.render();
     // The layers may still be showing a storm's water.
     refreshLayersNow();
@@ -543,8 +817,9 @@ export function createForecastRainDriver({ rainfall, playHoursPerSecond, refresh
     session.playing = false;
     pendingShow = null;
     stormsDirty = false;
-    replayTo(session.fromMs);
-    rainfall.render();
+    rewindGrid();
+    dryWaterAt(session.fromMs);
+    showMoment(session.fromMs);
     refreshLayersNow();
     report();
   }
@@ -629,6 +904,29 @@ export function createForecastRainDriver({ rainfall, playHoursPerSecond, refresh
 
     get active() {
       return Boolean(session);
+    },
+
+    /** The water is still being run through the hours before the moment shown. */
+    get catchingUp() {
+      return Boolean(session) && waterEnabled() && session.waterMs !== session.waterTargetMs;
+    },
+
+    /**
+     * Whether a span runs the street and drain models at all, or only draws
+     * and routes the rain (a water window of zero).
+     */
+    get waterEnabled() {
+      return waterEnabled();
+    },
+
+    /** Where the water models' own clock stands, Unix ms. */
+    get waterMs() {
+      return session ? session.waterMs : null;
+    },
+
+    /** How many snapshots the window is holding, for tests and tuning. */
+    get snapshotCount() {
+      return session ? session.snapshots.length : 0;
     },
 
     get playing() {
