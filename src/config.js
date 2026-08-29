@@ -157,6 +157,13 @@ export const config = {
   // `npm run build:drainage`; without the file the streets fall back to the
   // generic drain term everywhere.
   enableDrainageModel: readFlag(env.VITE_ENABLE_DRAINAGE_MODEL, true),
+  // Which engine routes the water under the streets (src/hydro/drainage.js).
+  // `diffusive` is this repo's model - Manning on the hydraulic grade line,
+  // documented in full in docs/formulas.md. `swmm` hands the pipes to EPA
+  // SWMM 5.2 compiled to WebAssembly, leaving the street model untouched, so
+  // the two can be compared with everything else held identical. Vite reads
+  // this at server start: changing it needs a RESTART, not a reload.
+  drainageEngine: readChoice(env.VITE_DRAINAGE_ENGINE, ['diffusive', 'swmm'], 'diffusive'),
   // Upper clamp on the water speed inside a pipe, m/s.
   pipeFlowMaxMs: readNumber(env.VITE_PIPE_MAX_FLOW_MS, 4, { min: 0.5, max: 10 }),
   // Flap valves on the sea outfalls stop the tide flowing back up the

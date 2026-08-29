@@ -25,7 +25,7 @@ import { createCloudLayer } from '../layers/cloudCover.js';
 import { createRainForecastLayers } from '../layers/rainForecast.js';
 import { createRainGaugeLayer } from '../layers/rainGauges.js';
 import { createRoadFlowLayer } from '../hydro/roadFlow.js';
-import { createPipeNetwork, loadDrainageModel } from '../hydro/pipeNetwork.js';
+import { createDrainage, loadDrainageModel } from '../hydro/drainage.js';
 import { createTideSource } from '../sources/tide.js';
 import { createWindSource } from '../sources/wind.js';
 import { createRainfallSimulator } from '../sim/rainfallSim.js';
@@ -182,13 +182,14 @@ export async function initializeMap() {
   map.on('zoomend', () => cloudCover.updateBlur(map.getZoom()));
 
   // --- the drainage network ------------------------------------------------------
-  // Under the streets (hydro/pipeNetwork.js): grated inlets take street
-  // water down, the surveyed pipes carry it by Manning's law, outfalls
-  // discharge against the tide, pump stations lift it out, and a manhole
-  // filled to its lid spills back onto the street above it.
+  // Under the streets (hydro/drainage.js picks the engine): grated inlets
+  // take street water down, the surveyed pipes carry it, outfalls discharge
+  // against the tide, pump stations lift it out, and a manhole filled to its
+  // lid spills back onto the street above it. Which engine does the carrying
+  // is VITE_DRAINAGE_ENGINE; the street model above is the same either way.
   let pipeNet = null;
   if (drainageModel && roadFlow.dynamic && roadFlow.graph) {
-    pipeNet = createPipeNetwork({
+    pipeNet = await createDrainage({
       model: drainageModel,
       streets: roadFlow.graph,
       onSpill: (streetIndex, m3) => roadFlow.dynamic.addWater(streetIndex, m3)

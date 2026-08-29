@@ -338,6 +338,12 @@ export function createPipeNetwork({ model, streets, seaLevel = null, onSpill = n
     kind,
     pumps: model.pumps,
 
+    // This engine's whole state is a few typed arrays, so any moment can be
+    // put back instantly and the timeline can scrub. An engine that has to
+    // restart to rewind - SWMM, through a hotstart file - says false here,
+    // and the UI stops offering free scrubbing. See hydro/drainage.js.
+    instantRestore: true,
+
     stats: {
       nodes: nodeCount,
       conduits: conduitCount,
