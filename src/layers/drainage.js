@@ -1,6 +1,6 @@
 import L from 'leaflet';
 import { POPUP_OPTIONS, createCanvasHoverTip, detailPopup, escapeHtml } from './detailCard.js';
-import { loadJson } from '../lib/loadJson.js';
+import { loadJson, loadJsonOrNull } from '../lib/loadJson.js';
 
 // Surveyed drainage network for Pattaya, from the city's GIS geodatabase
 // (Data_Pattaya.gdb, feature datasets `drain` -> drainage_line / drainage_point),
@@ -288,8 +288,50 @@ export async function createDrainagePipeLayer({ isInside } = {}) {
     hoverTip = null;
   });
 
+  // The survey's own chamber outlines and flow directions ride with the
+  // pipes: they are the same network, drawn from playground.geojson
+  // (scripts/extract-playground.py). Chambers as thin outlines in the pipe
+  // colour; each flow run that sits on a surveyed drain gets a small arrow in
+  // the colour of the run beneath it. Flow drawn along a street instead of a
+  // drain gets nothing - an arrow there would read as drainage that is not
+  // present.
+  const group = L.layerGroup([layer]);
+  const survey = await loadJsonOrNull(SURVEY_EXTRAS_URL);
+  if (survey?.features) {
+    const chambers = survey.features.filter((f) => f.properties?.kind === 'chamber');
+    if (chambers.length) {
+      group.addLayer(
+        L.geoJSON(
+          { type: 'FeatureCollection', features: chambers },
+          {
+            // The default SVG renderer, so the outlines stay clickable: the
+            // canvas the pipes draw on hit-tests only its own paths.
+            style: () => ({ color: '#0891b2', weight: 1, opacity: 0.75, fillColor: '#0891b2', fillOpacity: 0.12 }),
+            onEachFeature: (feature, chamberLayer) => {
+              chamberLayer.bindPopup(() => chamberPopup(feature.properties || {}), POPUP_OPTIONS);
+            }
+          }
+        )
+      );
+    }
+    const anchors = [];
+    for (const feature of survey.features) {
+      const props = feature.properties || {};
+      if (props.kind !== 'flow' || props.onPipe === false) {
+        continue;
+      }
+      const anchor = flowAnchor(feature, pipeColor(props.pipeType));
+      if (anchor) {
+        anchors.push(anchor);
+      }
+    }
+    if (anchors.length) {
+      group.addLayer(new FlowArrowLayer(anchors));
+    }
+  }
+
   return {
-    layer,
+    layer: group,
     label: 'Drainage Pipes',
     available: true,
     count: features.length,
@@ -297,6 +339,133 @@ export async function createDrainagePipeLayer({ isInside } = {}) {
     baseStyle
   };
 }
+
+const SURVEY_EXTRAS_URL = '/data/playground.geojson';
+
+function chamberPopup(props) {
+  const w = props.width_m;
+  const l = props.length_m;
+  return detailPopup({
+    title: 'Drainage chamber',
+    rows: [
+      ['Cover', props.cover ? escapeHtml(String(props.cover)) : null],
+      ['Type', props.type ? escapeHtml(String(props.type)) : null],
+      ['Size', w && l ? `${w} × ${l} m` : null],
+      ['Plan area', w && l ? `${(w * l).toFixed(2)} m²` : null]
+    ],
+    source: SURVEY
+  });
+}
+
+// Arrows only once individual runs are legible; below this they would be a
+// carpet of triangles over a street map nobody can read anyway.
+const FLOW_ARROW_MIN_ZOOM = 15;
+const ARROW_SIZE_PX = 9;
+
+/**
+ * The anchor and bearing of one flow run's arrow, or null if it has no
+ * usable segment. Computed once, at load.
+ */
+function flowAnchor(feature, color) {
+  const geometry = feature.geometry;
+  const line =
+    geometry?.type === 'LineString'
+      ? geometry.coordinates
+      : geometry?.type === 'MultiLineString'
+        ? geometry.coordinates[0]
+        : null;
+  if (!line || line.length < 2) {
+    return null;
+  }
+  const mid = Math.max(1, Math.floor(line.length / 2));
+  const [x1, y1] = line[mid - 1];
+  const [x2, y2] = line[mid];
+  return {
+    lat: (y1 + y2) / 2,
+    lng: (x1 + x2) / 2,
+    // atan2(east, north) is a compass bearing, and the canvas is rotated the
+    // same way: the arrow is drawn pointing up and the map is drawn north-up.
+    angle: Math.atan2(x2 - x1, y2 - y1),
+    color
+  };
+}
+
+/**
+ * Every flow arrow on one canvas, drawn only for what is on screen and only
+ * once zoomed in.
+ *
+ * A marker each was the obvious version and made the layer unusable: 1,524
+ * DOM nodes with an inline SVG apiece, all of them repositioned by Leaflet on
+ * every pan. One canvas costs a few hundred triangles per frame instead.
+ */
+const FlowArrowLayer = L.Layer.extend({
+  initialize(anchors) {
+    this._anchors = anchors;
+  },
+
+  onAdd(map) {
+    this._map = map;
+    // leaflet-zoom-hide: the canvas is hidden through a zoom animation and
+    // redrawn at the end, rather than being smeared across the transition.
+    this._canvas = L.DomUtil.create('canvas', 'leaflet-zoom-hide drainage-flow-arrows');
+    this._canvas.style.pointerEvents = 'none';
+    map.getPanes().overlayPane.appendChild(this._canvas);
+    map.on('moveend zoomend resize', this._reset, this);
+    this._reset();
+  },
+
+  onRemove(map) {
+    map.off('moveend zoomend resize', this._reset, this);
+    this._canvas?.remove();
+    this._canvas = null;
+  },
+
+  _reset() {
+    const map = this._map;
+    if (!map || !this._canvas) {
+      return;
+    }
+    const size = map.getSize();
+    L.DomUtil.setPosition(this._canvas, map.containerPointToLayerPoint([0, 0]));
+    if (this._canvas.width !== size.x || this._canvas.height !== size.y) {
+      this._canvas.width = size.x;
+      this._canvas.height = size.y;
+    }
+    this._draw();
+  },
+
+  _draw() {
+    const map = this._map;
+    const ctx = this._canvas.getContext('2d');
+    ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+    if (map.getZoom() < FLOW_ARROW_MIN_ZOOM) {
+      return;
+    }
+    // A little past the edge, so an arrow half off-screen still appears.
+    const bounds = map.getBounds().pad(0.05);
+    const h = ARROW_SIZE_PX / 2;
+    ctx.globalAlpha = 0.9;
+    for (const arrow of this._anchors) {
+      if (!bounds.contains([arrow.lat, arrow.lng])) {
+        continue;
+      }
+      const point = map.latLngToContainerPoint([arrow.lat, arrow.lng]);
+      ctx.save();
+      ctx.translate(point.x, point.y);
+      ctx.rotate(arrow.angle);
+      ctx.beginPath();
+      ctx.moveTo(0, -h);
+      ctx.lineTo(h * 0.78, h);
+      ctx.lineTo(0, h * 0.38);
+      ctx.lineTo(-h * 0.78, h);
+      ctx.closePath();
+      ctx.fillStyle = arrow.color;
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+});
 
 // --- pipe hit-testing ------------------------------------------------------
 // The runs' segments in ~220 m grid cells; a segment goes into every cell its

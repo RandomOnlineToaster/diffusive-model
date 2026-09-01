@@ -53,6 +53,7 @@ COVERS_PATH = DATA / 'drainage-covers.geojson'
 PUMPS_PATH = DATA / 'drainage-pumps.geojson'
 DEPTHS_PATH = DATA / 'drainage-depths.geojson'
 SUMPS_PATH = DATA / 'drainage-sumps.geojson'
+PLAYGROUND_PATH = DATA / 'playground.geojson'
 ROADS_PATH = DATA / 'chonburi-road-network.json'
 RIVERS_PATH = DATA / 'chonburi-rivers.geojson'
 BOUNDARY_PATH = ROOT / 'data' / 'chonburi.geojson'
@@ -74,6 +75,15 @@ KERB_INLET_PERIMETER_M = float(os.environ.get('KERB_INLET_PERIMETER_M', 2.4))
 NODE_TO_STREET_M = 60.0
 PUMP_TO_PIPE_M = 80.0
 MANHOLE_TO_PIPE_M = 5.0
+# A surveyed chamber outline (drainage_polygon) sizes the junction this near
+# to it. Looser than the cover radius: a chamber is matched by the centroid of
+# a polygon several metres long, not by a point dropped on the lid.
+CHAMBER_TO_PIPE_M = 10.0
+# The chamber plan areas worth believing. Below this it is a lid, not a
+# chamber; above it the feature is a basin or a long channel run, and giving
+# one junction that much storage would quietly stop it ever surcharging.
+CHAMBER_MIN_M2 = 0.3
+CHAMBER_MAX_M2 = 60.0
 # How far a junction may look for a measured depth before it falls back to
 # the assumed cover. A manhole depth is the better measurement - it is the
 # depth of the chamber the pipes meet in - so it is looked for first, and
@@ -228,10 +238,38 @@ def manning_for(material):
 
 # --- build -------------------------------------------------------------------
 
+def polygon_centre(geometry):
+    """The mean of a (Multi)Polygon's outer ring, as [lng, lat].
+
+    Good enough to match a chamber to the junction it sits on: these outlines
+    are a few metres across, well inside the matching radius.
+    """
+    if not geometry:
+        return None
+    kind = geometry.get('type')
+    if kind == 'Polygon':
+        rings = [geometry['coordinates'][0]]
+    elif kind == 'MultiPolygon':
+        rings = [part[0] for part in geometry['coordinates'] if part]
+    else:
+        return None
+    points = [point for ring in rings for point in ring]
+    if not points:
+        return None
+    return [sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points)]
+
+
 def main():
     pipes = load_json(PIPES_PATH)['features']
     covers = load_json(COVERS_PATH)['features']
     pumps = (load_json(PUMPS_PATH, required=False) or {'features': []})['features']
+    # Surveyed chamber outlines, if scripts/extract-playground.py has been run.
+    # These are the CHAMBER footprint; the covers' own mh_w/mh_l describe the
+    # lid, which is a different and much smaller thing.
+    chambers = [
+        f for f in (load_json(PLAYGROUND_PATH, required=False) or {'features': []})['features']
+        if f.get('properties', {}).get('kind') == 'chamber'
+    ]
     roads = load_json(ROADS_PATH)
     rivers = load_json(RIVERS_PATH, required=False)
     boundary = load_json(BOUNDARY_PATH, required=False)
@@ -511,6 +549,32 @@ def main():
         return (a if da <= db else b), best_d
 
     shaft = np.full(node_count, DEFAULT_SHAFT_M2)
+
+    # Surveyed chamber outlines size the junction they sit on. This is the
+    # storage a manhole actually has above its pipes, and it decides how fast
+    # a node surcharges and spills onto the street - so a default of 1 m2
+    # across 6,592 of 6,903 junctions was making the whole network spill
+    # earlier than it should.
+    chamber_sized = 0
+    for feature in chambers:
+        props = feature.get('properties', {})
+        w, l = props.get('width_m'), props.get('length_m')
+        if not (isinstance(w, (int, float)) and isinstance(l, (int, float))):
+            continue
+        area = float(w) * float(l)
+        if not (CHAMBER_MIN_M2 <= area <= CHAMBER_MAX_M2):
+            continue
+        centre = polygon_centre(feature['geometry'])
+        if centre is None:
+            continue
+        x, y = frame.to_xy(centre[0], centre[1])
+        k, _ = pipe_index.nearest(x, y, CHAMBER_TO_PIPE_M)
+        if k >= 0 and area > shaft[k]:
+            shaft[k] = area
+            chamber_sized += 1
+    if chambers:
+        print(f'  {chamber_sized:,} junctions sized by a surveyed chamber '
+              f'(of {len(chambers):,} outlines)')
 
     # Manhole chambers size the junctions they sit on, and any grated cover
     # lends its opening to the street junction nearest it.

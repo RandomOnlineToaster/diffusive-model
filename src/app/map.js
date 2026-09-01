@@ -19,6 +19,7 @@ import { createRiverLayer, createWaterBodyLayer } from '../layers/waterways.js';
 import { createWaterGateLayer } from '../layers/waterGates.js';
 import { createSensorStationLayer } from '../layers/sensors.js';
 import { createDrainagePipeLayer, createDrainageCoverLayer } from '../layers/drainage.js';
+import { createFloodAreaLayer } from '../layers/floodArea.js';
 import { createPumpStationLayer } from '../layers/pumpStations.js';
 import { createPondingLayer } from '../layers/ponding.js';
 import { createCloudLayer } from '../layers/cloudCover.js';
@@ -146,6 +147,9 @@ export async function initializeMap() {
     ]);
   // The 80k covers load on first use, not now, so this is only the layer shell.
   const drainageCovers = createDrainageCoverLayer({ isInside: isInsideProvince });
+  // The city's own flood-prone areas, drawn to lay over the ponding output.
+  // The survey's chambers and flow arrows ride inside the Drainage Pipes layer.
+  const floodArea = await createFloodAreaLayer({ isInside: isInsideProvince });
 
   // --- the physics' inputs -------------------------------------------------------
   // The surveyed pipe graph, the sea level its outfalls meet, and the wind
@@ -296,6 +300,7 @@ export async function initializeMap() {
       // use, so the menu can offer them without 80k markers up front.
       [drainagePipes.available ? drainagePipes.label : wipLabel(drainagePipes.label)]: drainagePipes.layer,
       [drainageCovers.label]: drainageCovers.layer,
+      [floodArea.label]: floodArea.layer,
       [pumpStations.available ? pumpStations.label : wipLabel(pumpStations.label)]: pumpStations.layer,
       [tunnelSensors.label]: tunnelSensors.layer,
       [poleSensors.label]: poleSensors.layer
@@ -578,6 +583,13 @@ export async function initializeMap() {
     }
     if (event.layer === pondingLayer) {
       pondingLayer.update?.();
+    }
+    if (event.layer === drainagePipes.layer) {
+      // Otherwise the fill colours wait on the street layer's throttled
+      // timer, which stretches to 6 s under a big flood and does not run at
+      // all while the rain is paused: a layer switched on mid-storm sat at
+      // its survey colours, reading as empty pipe under a flooded street.
+      pipes.recolour();
     }
 
     if (event.layer === rainfall.layer) {

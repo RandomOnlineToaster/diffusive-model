@@ -103,6 +103,37 @@ def to_lonlat(xs, ys):
     return [[round(float(a), 6), round(float(b), 6)] for a, b in zip(lon, lat)]
 
 
+def size_in_metres(value):
+    """DRAIN_SIZE, normalised to metres.
+
+    The field is written as text and mixes units: most runs are metres
+    ("0.80", "1.50x1.50") but a handful - the HDPE pressure mains among them -
+    were entered in millimetres ("315", "2200"). No drain in this city is
+    10 m across, so anything reading past that is millimetres. Box culverts
+    keep their WxH form, each side converted on its own.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    def one(part):
+        try:
+            metres = float(part)
+        except ValueError:
+            return part.strip()
+        if metres > 10:
+            metres /= 1000
+        # Trailing zeros off, but keep it looking like a measurement.
+        return f'{metres:g}'
+
+    for mark in ('x', 'X', '×'):
+        if mark in text:
+            return 'x'.join(one(part) for part in text.split(mark))
+    return one(text)
+
+
 def properties(fields, index, spec):
     props = {}
     for src, key in spec:
@@ -113,6 +144,8 @@ def properties(fields, index, spec):
             continue
         if key == 'length_m' and isinstance(val, float):
             val = round(val, 1)
+        if key == 'size':
+            val = size_in_metres(val)
         props[key] = val
     return props
 
