@@ -27,7 +27,7 @@ function describeArea(value) {
 
 export async function createSensorStationLayer({ sensorType = 'TUNNEL' } = {}) {
   const inPipe = sensorType === 'TUNNEL';
-  const label = inPipe ? 'Tunnel Sensors' : 'Pole Sensors';
+  const label = inPipe ? 'Tunnel Sensors' : 'Road Sensor';
   const data = await loadStationData();
   const features = (data?.features || []).filter(
     (feature) => feature.properties.sensorType === sensorType

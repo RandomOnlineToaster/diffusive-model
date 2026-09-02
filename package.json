@@ -10,6 +10,7 @@
     "fetch:dem": "node scripts/fetch-dem.mjs && python scripts/build-dem-cache.py",
     "build:dem-cache": "python scripts/build-dem-cache.py",
     "fetch:rivers": "node scripts/fetch-rivers.mjs",
+    "fetch:landcover": "node scripts/fetch-landcover.mjs",
     "fetch:water": "node scripts/fetch-water.mjs",
     "build:pattaya": "node scripts/build-pattaya-network.mjs",
     "fetch:roads": "node scripts/fetch-roads.mjs",

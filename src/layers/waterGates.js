@@ -27,7 +27,7 @@ export async function createWaterGateLayer({ isInside } = {}) {
       layer: L.layerGroup(
         DEMO_WATER_GATES.map((gate) => waterGateMarker(gate.position, gate.name, 'demo', 'placeholder'))
       ),
-      label: placeholderLabel('Water Gates')
+      label: placeholderLabel('Sluice Gate')
     };
   }
 
@@ -43,7 +43,7 @@ export async function createWaterGateLayer({ isInside } = {}) {
         )
       )
     ),
-    label: 'Water Gates'
+    label: 'Sluice Gate'
   };
 }
 

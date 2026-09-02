@@ -38,7 +38,7 @@ import pyogrio.raw as raw
 from shapely import from_wkb, get_coordinates, get_parts, get_type_id
 from pyproj import Transformer
 
-DEFAULT_GDB = r'D:\Code\_SCS\data\1.GIS_Geodatabase\Data_Pattaya.gdb'
+DEFAULT_GDB = r'D:\Code\_SCS\data\GIS\1.GIS_Geodatabase\Data_Pattaya.gdb'
 GDB = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_GDB
 OUT = Path(__file__).resolve().parent.parent / 'public' / 'data'
 WGS = Transformer.from_crs('EPSG:32647', 'EPSG:4326', always_xy=True)

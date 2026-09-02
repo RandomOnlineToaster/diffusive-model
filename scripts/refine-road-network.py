@@ -55,7 +55,7 @@ import pyogrio.raw as raw
 from pyproj import Transformer
 from shapely import from_wkb, get_coordinates, get_parts, get_type_id
 
-DEFAULT_GDB = r'D:\Code\_SCS\data\1.GIS_Geodatabase\Data_Pattaya.gdb'
+DEFAULT_GDB = r'D:\Code\_SCS\data\GIS\1.GIS_Geodatabase\Data_Pattaya.gdb'
 GDB = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_GDB
 ROOT = Path(__file__).resolve().parent.parent
 NETWORK = ROOT / 'public' / 'data' / 'chonburi-road-network.json'

@@ -197,6 +197,10 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
     const curbVolM3 = new Float64Array(nodeCount);
     const CURB_M = config.streetCurbDepthM;
 
+    // The verge's pervious share per junction, from the land-use build; null
+    // means the flat configured fraction serves the whole network.
+    let pervStrip = null;
+
     // Water below this is a film, not flow; below the snap volume it is gone.
     const MIN_FLOW_DEPTH = 5e-4;
     const SNAP_DRY_M3 = 1e-4 * PATCH_M2;
@@ -301,6 +305,13 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
       }
 
       const widths = data.width;
+      // Imperviousness per junction, from the land-use build
+      // (scripts/build-imperviousness.py). With it, the runoff coefficient
+      // and the verge's soak vary with what actually surrounds the street -
+      // a golf course and a commercial block used to shed the same storm.
+      // Without the array, the flat configured values stand as before.
+      const impervOf = data.imperv;
+      pervStrip = impervOf ? new Float32Array(nodeCount) : null;
       for (let n = 0; n < nodeCount; n += 1) {
         // The street this junction owns: its surveyed width over half of
         // every street running into it. Without a width, the configured
@@ -311,10 +322,21 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
         curbVolM3[n] = own * CURB_M;
 
         const catchmentM2 = halfLen[n] * config.streetCatchmentWidthM;
-        const factor = (config.streetRunoffCoeff * catchmentM2) / own;
+        // A mostly-sealed corridor sheds nearly everything; open ground keeps
+        // most of its rain. 0.15 + 0.8·imperv spans 0.15 (soil) to 0.95
+        // (solid roof and pavement), around the flat coefficient's 0.9.
+        const coeff = impervOf
+          ? 0.15 + 0.8 * impervOf[n]
+          : config.streetRunoffCoeff;
+        const factor = (coeff * catchmentM2) / own;
         // Never less than the rain landing on the street itself.
         runoffFactor[n] = factor > 1 ? factor : 1;
         floodAreaM2[n] = catchmentM2 > own ? catchmentM2 : own;
+        // The verge's pervious share is the corridor's unsealed remainder.
+        if (pervStrip) {
+          const soil = 1 - impervOf[n];
+          pervStrip[n] = soil > 0.02 ? soil : 0.02;
+        }
       }
     }
 
@@ -1088,7 +1110,9 @@ export async function createRoadFlowLayer({ minUpstream } = {}) {
               if (wetSince[n] < 0) {
                 wetSince[n] = simSeconds;
               }
-              const pervious = spread ? config.perviousStripFraction : config.perviousStreetFraction;
+              const pervious = spread
+                ? (pervStrip ? pervStrip[n] : config.perviousStripFraction)
+                : config.perviousStreetFraction;
               if (pervious > 0) {
                 // Horton's curve, inlined: called per wet junction per
                 // substep, and the argument object is otherwise garbage.

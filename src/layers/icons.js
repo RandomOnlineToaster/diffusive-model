@@ -12,6 +12,18 @@ import L from 'leaflet';
 
 const HALO = 'fill="none" stroke="#ffffff" stroke-width="3.6" stroke-linejoin="round" stroke-linecap="round"';
 
+
+// The supplied marker art (public/icons/, 512px RGBA), drawn small. One
+// L.icon per file keeps every layer's markers in the same visual family.
+function pngIcon(url, size = 24) {
+  return L.icon({
+    iconUrl: url,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    popupAnchor: [0, -size / 2]
+  });
+}
+
 function svgIcon(shapes, color, size = 20) {
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="${size}" height="${size}">` +
@@ -56,8 +68,8 @@ const roadSensorShapes = (fill, stroke) => `
     fill="none" stroke="${stroke}" stroke-width="1.4" stroke-linecap="round" />`;
 
 // Built once at module load, then shared by every marker of that type.
-export const WATER_GATE_ICON = svgIcon(gateShapes, '#7c3aed');
+export const WATER_GATE_ICON = pngIcon('/icons/sluice.png');
 // Blue = inside the pipe, slate = at road level. Both sit outside the
 // green-to-red ramp reserved for flow status.
-export const PIPE_SENSOR_ICON = svgIcon(pipeSensorShapes, '#1d4ed8');
-export const ROAD_SENSOR_ICON = svgIcon(roadSensorShapes, '#475569');
+export const PIPE_SENSOR_ICON = pngIcon('/icons/tunnel.png');
+export const ROAD_SENSOR_ICON = pngIcon('/icons/road.png');

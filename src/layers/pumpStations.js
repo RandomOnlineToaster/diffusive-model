@@ -31,9 +31,9 @@ const PUMP_SVG =
 function pumpIcon() {
   return L.divIcon({
     className: 'pump-station-icon',
-    html: PUMP_SVG,
-    iconSize: [26, 23],
-    iconAnchor: [13, 22],
+    html: '<img src="/icons/pump.png" width="26" height="26" alt="">',
+    iconSize: [26, 26],
+    iconAnchor: [13, 24],
     popupAnchor: [0, -20]
   });
 }

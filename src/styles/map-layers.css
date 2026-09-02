@@ -88,13 +88,14 @@
   font-weight: 400;
 }
 
-/* Pump stations: the purple pump icon, lit while the station is pumping. */
+/* Pump stations: the pump icon, lit while the station is pumping. No
+   resting drop-shadow: on the flat tinted art it read as embossed 3D. */
 .pump-station-icon {
   background: none;
   border: none;
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
 }
 
+.pump-station-icon img,
 .pump-station-icon svg {
   display: block;
 }
@@ -109,3 +110,8 @@
 }
 
 
+
+/* Coverage cards: each datum coloured by whether the survey has it. */
+.cov-ok { color: #16a34a; font-weight: 600; }
+.cov-miss { color: #dc2626; font-weight: 600; }
+.cov-meh { color: #6b7280; }

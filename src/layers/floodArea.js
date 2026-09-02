@@ -22,7 +22,7 @@ export async function createFloodAreaLayer({ isInside = null } = {}) {
   const areas = (data?.features ?? []).filter((feature) => feature.properties?.kind === 'flood-risk');
 
   if (areas.length === 0) {
-    return { layer: L.layerGroup([]), label: placeholderLabel('Flood Area'), available: false };
+    return { layer: L.layerGroup([]), label: placeholderLabel('Flood Risk Area'), available: false };
   }
 
   const layer = L.geoJSON(
@@ -47,7 +47,7 @@ export async function createFloodAreaLayer({ isInside = null } = {}) {
     }
   );
 
-  return { layer, label: 'Flood Area', available: true, count: areas.length };
+  return { layer, label: 'Flood Risk Area', available: true, count: areas.length };
 }
 
 function anyVertexInside(geometry, isInside) {

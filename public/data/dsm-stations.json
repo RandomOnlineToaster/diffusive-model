@@ -1,0 +1,12 @@
+{
+  "source": "PAT-DB public.DSM + public.DSM_station (Pattaya Smart Sanitary), exported 2026-09-01",
+  "note": "Flood warning signs at their surveyed roadside positions. Each sign watches ONE sensor station (stationId) and changes its message as that station's level crosses min, mid and max.",
+  "signs": [
+    { "name": "หน้าร้าน Vespa Mityon PATTAYA", "latitude": 12.943314, "longitude": 100.895272, "deviceId": "PAT-D8A0A7C4BA7", "minLevel": 1.8, "midLevel": 1.9, "maxLevel": 2.0, "dsmId": "6b3c88eb-e8f3-4e75-a64c-4bfe2617d577", "stationId": "5cda5d0b-e8ef-47aa-9658-6dc1203a9383" },
+    { "name": "หน้าร้าน Sound About 90's", "latitude": 12.939389, "longitude": 100.893785, "deviceId": "PAT-D54E615B1BC", "minLevel": 1.8, "midLevel": 2.5, "maxLevel": 3.0, "dsmId": "065fedf2-987b-4d12-9a70-490dfdf03eba", "stationId": "5cda5d0b-e8ef-47aa-9658-6dc1203a9383" },
+    { "name": "หน้าปากซอยสุขุมวิท69", "latitude": 12.924141, "longitude": 100.898631, "deviceId": "PAT-DBF53078F13", "minLevel": 1.8, "midLevel": 2.1, "maxLevel": 2.2, "dsmId": "67161b90-6b7c-4fef-b4f5-069bdc613565", "stationId": "2f64a8b2-6f2d-4584-8f50-38d9021bb18e" },
+    { "name": "เกาะกลางไฟแดงพัทยาใต้", "latitude": 12.916183, "longitude": 100.895873, "deviceId": "PAT-DE0E45BB6EC", "minLevel": 1.8, "midLevel": 2.6, "maxLevel": 2.7, "dsmId": "f4965011-9d13-4f1f-9b2b-b986e42999e7", "stationId": "2f64a8b2-6f2d-4584-8f50-38d9021bb18e" },
+    { "name": "แยกวัดธรรมสามัคคี (ถนนเลียบรถไฟ)", "latitude": 12.916104, "longitude": 100.902359, "deviceId": "PAT-D7DFA45ABEA", "minLevel": 1.6, "midLevel": 1.8, "maxLevel": 2.0, "dsmId": "8d88c967-1ec9-46af-aa38-a18ac72a9a6b", "stationId": "889aaeb1-4eb3-4ef5-bb81-e986eef97daa" },
+    { "name": "หน้าปากซอยสุขุมวิท 81", "latitude": 12.910661, "longitude": 100.901295, "deviceId": "PAT-DD4AF50B674", "minLevel": 1.6, "midLevel": 3.1, "maxLevel": 3.2, "dsmId": "d6e347ce-1870-48a6-8261-47a61f41d5c8", "stationId": "889aaeb1-4eb3-4ef5-bb81-e986eef97daa" }
+  ]
+}

@@ -19,7 +19,9 @@ import { createRiverLayer, createWaterBodyLayer } from '../layers/waterways.js';
 import { createWaterGateLayer } from '../layers/waterGates.js';
 import { createSensorStationLayer } from '../layers/sensors.js';
 import { createDrainagePipeLayer, createDrainageCoverLayer } from '../layers/drainage.js';
+import { createCoverageLayer } from '../layers/coverage.js';
 import { createFloodAreaLayer } from '../layers/floodArea.js';
+import { createWarningSignLayer } from '../layers/warningSigns.js';
 import { createPumpStationLayer } from '../layers/pumpStations.js';
 import { createPondingLayer } from '../layers/ponding.js';
 import { createCloudLayer } from '../layers/cloudCover.js';
@@ -150,6 +152,8 @@ export async function initializeMap() {
   // The city's own flood-prone areas, drawn to lay over the ponding output.
   // The survey's chambers and flow arrows ride inside the Drainage Pipes layer.
   const floodArea = await createFloodAreaLayer({ isInside: isInsideProvince });
+  // The flood warning signs, anchored at the sensor stations they watch.
+  const warningSigns = await createWarningSignLayer();
 
   // --- the physics' inputs -------------------------------------------------------
   // The surveyed pipe graph, the sea level its outfalls meet, and the wind
@@ -277,7 +281,6 @@ export async function initializeMap() {
   // out with a "(Placeholder)" suffix, which kept the control cluttered.
   const usingPlaceholderDEM = dem.source === 'placeholder';
   const demLabel = (text) => (usingPlaceholderDEM ? placeholderLabel(text) : text);
-  const elevationLayerLabel = demLabel('Elevation');
   const flowDirectionLabel = demLabel('Flow Direction');
   // "Flow accumulation" is the GIS term for upstream contributing area -
   // where flow CONVERGES, not where water stands - so the menu says Catchment.
@@ -285,25 +288,34 @@ export async function initializeMap() {
   const flowPathLabel = demLabel('Flow Paths');
   const contourLayerLabel = demLabel('Elevation Contours');
 
+  // The boundary is not on the menu: it is the map's frame of reference and
+  // stays on. The elevation raster came off too - the contours say the same
+  // thing legibly. Two entries are spoken for but not built yet - Risk Area
+  // Sim and Warning Sign - and sit in the working colour until they exist.
+  // Data readiness per drain run: can this pipe be computed on, and if
+  // not, what exactly is missing. Drawn from the same features the pipe
+  // layer holds, against the pipe graph's invert sources.
+  const coverage = await createCoverageLayer({ model: drainageModel, pipeFeatures: drainagePipes.features });
+
   const geographyControl = L.control.layers(
     baseMaps,
     {
-      'Chon Buri Boundary': boundaryLayer,
-      [elevationLayerLabel]: elevationLayer,
       [contourLayerLabel]: contourLayer,
       [rivers.label]: rivers.layer,
       [waterBodies.label]: waterBodies.layer,
-      [waterGates.label]: waterGates.layer,
+      [floodArea.label]: floodArea.layer,
       // The surveyed drainage network from the city's GIS geodatabase: the
       // gravity pipes, the manhole/inlet covers and the pump stations, as
       // three layers. The covers paint only when zoomed in and load on first
       // use, so the menu can offer them without 80k markers up front.
+      [coverage.available ? coverage.label : wipLabel('Coverage Data')]: coverage.layer,
       [drainagePipes.available ? drainagePipes.label : wipLabel(drainagePipes.label)]: drainagePipes.layer,
       [drainageCovers.label]: drainageCovers.layer,
-      [floodArea.label]: floodArea.layer,
       [pumpStations.available ? pumpStations.label : wipLabel(pumpStations.label)]: pumpStations.layer,
+      [waterGates.label]: waterGates.layer,
       [tunnelSensors.label]: tunnelSensors.layer,
-      [poleSensors.label]: poleSensors.layer
+      [poleSensors.label]: poleSensors.layer,
+      [warningSigns.available ? warningSigns.label : wipLabel(warningSigns.label)]: warningSigns.layer
     },
     { collapsed: false }
   );
@@ -629,11 +641,16 @@ export async function initializeMap() {
     null,
     {
       'Rainfall Simulator': rainfall.layer,
+      // Spoken for, not built: simulating the surveyed risk areas is the
+      // next thing this panel grows.
+      [wipLabel('Risk Area Sim')]: L.layerGroup([]),
       [flowDirectionLabel]: flowDirectionLayer,
       [flowPathLabel]: flowPathLayer,
       [wipLabel(roadFlow.label)]: roadFlow.layer,
-      Ponding: pondingLayer,
-      [flowAccumulationLabel]: flowAccumulationLayer
+      // Ponding and Catchment hold the working colour too: both run, but
+      // their formulas are marked for rework.
+      [wipLabel('Ponding')]: pondingLayer,
+      [wipLabel(flowAccumulationLabel)]: flowAccumulationLayer
     },
     { collapsed: false }
   );

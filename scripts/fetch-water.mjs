@@ -14,9 +14,11 @@ const GATES_PATH = path.join(OUTPUT_DIR, 'chonburi-water-gates.geojson');
 const BODIES_PATH = path.join(OUTPUT_DIR, 'chonburi-water-bodies.geojson');
 
 const GATE_TYPES = 'sluice_gate|floodgate|weir|dam|check_dam|lock_gate';
-// Ponds below this are usually individual aquaculture or farm ponds; keeping
-// them all would add tens of thousands of shapes with little analytical value.
-const MIN_BODY_AREA_M2 = 10000;
+// Ponds below this are usually individual aquaculture or farm ponds. This
+// was 10,000 m2, which also dropped most of the city's ponds and basins -
+// the open water street runoff actually reaches; 167 water polygons stood in
+// the Pattaya box and the file carried a fraction of them.
+const MIN_BODY_AREA_M2 = 2000;
 
 const bounds = readChonBuriBounds();
 const bbox = toBboxString(bounds);
@@ -94,8 +96,10 @@ const bodyPayload = await requestOverpass(`
 (
   way["natural"="water"](${bbox});
   way["landuse"="reservoir"](${bbox});
+  way["natural"="wetland"](${bbox});
   relation["natural"="water"](${bbox});
   relation["landuse"="reservoir"](${bbox});
+  relation["natural"="wetland"](${bbox});
 );
 out geom;
 `);

@@ -272,18 +272,35 @@ export async function createDrainagePipeLayer({ isInside } = {}) {
     hoverTip?.hide();
     L.popup(POPUP_OPTIONS).setLatLng(event.latlng).setContent(pipePopup(features[hit].properties)).openOn(map);
   };
+  // Zoomed out the bore-weighted lines read too heavy, so the weight follows
+  // the zoom. Only the weight is merged in: the rain-time recolour owns the
+  // colour, and this must not repaint it.
+  const weightScale = (zoom) => (zoom >= 15 ? 1 : zoom >= 13 ? 0.7 : 0.5);
+  const restyleWeights = () => {
+    const map = layer._map;
+    if (!map) {
+      return;
+    }
+    const f = weightScale(map.getZoom());
+    for (const featureLayer of featureLayers.values()) {
+      featureLayer.setStyle({ weight: baseStyle(featureLayer.feature).weight * f });
+    }
+  };
   layer.on('add', () => {
     const map = layer._map;
     hoverTip = createCanvasHoverTip(map);
     map.on('click', onClick);
     map.on('mousemove', onMove);
     map.on('mouseout', onMove);
+    restyleWeights();
+    map.on('zoomend', restyleWeights);
   });
   layer.on('remove', () => {
     const map = layer._map;
     map.off('click', onClick);
     map.off('mousemove', onMove);
     map.off('mouseout', onMove);
+    map.off('zoomend', restyleWeights);
     hoverTip?.hide();
     hoverTip = null;
   });
@@ -335,6 +352,7 @@ export async function createDrainagePipeLayer({ isInside } = {}) {
     label: 'Drainage Pipes',
     available: true,
     count: features.length,
+    features,
     featureLayers,
     baseStyle
   };
